@@ -1,0 +1,7 @@
+{$DOMAIN} {
+	encode zstd gzip
+	reverse_proxy app:8080 {
+		# большие загрузки идут потоком, без буферизации
+		flush_interval -1
+	}
+}

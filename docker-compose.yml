@@ -1,0 +1,63 @@
+# Базовый запуск:          docker compose up -d
+# С HTTPS через Caddy:     docker compose --profile https up -d   (задайте DOMAIN в .env)
+# С хранилищем Garage (S3): docker compose --profile s3 up -d      (см. README, раздел «S3 / Garage»)
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: cloudbox
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-cloudbox}
+      POSTGRES_DB: cloudbox
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cloudbox"]
+      interval: 5s
+      retries: 10
+
+  app:
+    build: .
+    image: cloudbox:latest
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      CB_DATABASE_URL: postgres://cloudbox:${DB_PASSWORD:-cloudbox}@db:5432/cloudbox?sslmode=disable
+    volumes:
+      - appdata:/data
+    ports:
+      - "${APP_PORT:-8080}:8080"
+
+  caddy:
+    profiles: ["https"]
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on: [app]
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN:-localhost}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddydata:/data
+
+  garage:
+    profiles: ["s3"]
+    image: dxflrs/garage:v2.1.0
+    restart: unless-stopped
+    volumes:
+      - ./deploy/garage.toml:/etc/garage.toml:ro
+      - garagemeta:/var/lib/garage/meta
+      - garagedata:/var/lib/garage/data
+
+volumes:
+  pgdata:
+  appdata:
+  caddydata:
+  garagemeta:
+  garagedata:
