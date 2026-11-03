@@ -58,7 +58,7 @@ function fmtDate(s) {
 const extOf = n => (n.name.split('.').pop() || '').toLowerCase();
 
 function iconFor(n) {
-  if (n.is_dir) return '📁';
+  if (n.is_dir) return n.e2e ? '🔒' : '📁';
   const m = n.mime || '';
   const ext = extOf(n);
   if (m.startsWith('image/')) return '🖼️';
@@ -337,7 +337,7 @@ function route() {
     recent: viewRecent, favorites: viewFavorites, shared: viewShared,
     tag: () => viewTag(+parts[1]),
     search: () => viewSearch(decodeURIComponent(parts.slice(1).join('/'))),
-    talk: () => viewTalk(parts[1] || null), mail: viewMail,
+    talk: () => viewTalk(parts[1] || null), mail: viewMail, e2e: () => viewE2E(parts[1]),
     gallery: viewGallery, notes: () => viewNotes(parts[1]), calendar: viewCalendar, contacts: viewContacts,
     activity: viewActivity, trash: viewTrash, shares: viewShares, settings: viewSettings, admin: viewAdmin,
     receive: () => viewFiles(null),
@@ -516,7 +516,7 @@ function fileRow(n, opts, list) {
   h('td', { class: 'c-act' }, star,
     h('button', { class: 'icon-btn', title: 'Поделиться', onclick: e => { e.stopPropagation(); shareDialog(n); } }, '🔗'),
     h('button', { class: 'icon-btn', title: 'Ещё', onclick: e => { e.stopPropagation(); const r = e.currentTarget.getBoundingClientRect(); nodeMenu(n, r.left - 180, r.bottom + 4, list); } }, '⋯')));
-  if (n.is_dir && writable(n)) attachDropTarget(tr, n.id);
+  if (n.is_dir && !n.e2e && writable(n)) attachDropTarget(tr, n.id); // в E2E-папку — только через её окно, с шифрованием
   return tr;
 }
 
@@ -542,6 +542,7 @@ function attachDropTarget(el, folderId) {
 }
 
 function openNode(n, list) {
+  if (n.is_dir && n.e2e) { location.hash = '#/e2e/' + n.id; return; }
   if (n.is_dir) { location.hash = '#/files/' + n.id; return; }
   if (canOffice(n)) { window.open('/office/' + n.id, '_blank'); return; }
   if (isText(n) && n.size < 2 * 1024 * 1024) { editorDialog(n); return; }
@@ -550,6 +551,7 @@ function openNode(n, list) {
 }
 
 function nodeMenu(n, x, y, list) {
+  if (n.e2e) { e2eRootMenu(n, x, y); return; } // шаринг, просмотр, теги и т. п. для шифротекста бессмысленны
   const w = writable(n) && (state.view !== 'files' || state.canWrite);
   const items = [];
   if (n.is_dir) items.push({ icon: '📂', label: 'Открыть', onClick: () => openNode(n, list) });
@@ -583,6 +585,8 @@ function newMenu(e) {
     { icon: '📁', label: 'Папку', onClick: newFolder },
     { icon: '🗒️', label: 'Заметку (Markdown)', onClick: () => newTextFile('Новая заметка.md', '# Новая заметка\n\n') },
     { icon: '📄', label: 'Текстовый файл', onClick: () => newTextFile('Новый файл.txt', '') },
+    // E2E-папки — только в своём дереве: ключ владельца не подходит к чужой общей папке
+    state.sharedBy ? null : { icon: '🔒', label: 'Зашифрованную папку (E2E)', onClick: () => e2eNewFolder(state.parent) },
   ]);
 }
 

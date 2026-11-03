@@ -448,7 +448,7 @@ func (s *Server) officePage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	perm, n, err := s.Files.Access(r.Context(), u.ID, r.PathValue("id"))
-	if err != nil || n.IsDir {
+	if err != nil || n.IsDir || n.E2E { // онлайн-офис получил бы шифротекст: ключа у сервера нет
 		http.NotFound(w, r)
 		return
 	}

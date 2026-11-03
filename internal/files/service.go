@@ -172,7 +172,7 @@ func (s *Service) PathOf(ctx context.Context, uid int64, id string) (string, err
 
 func (s *Service) Recent(ctx context.Context, uid int64, limit int) ([]Node, error) {
 	rows, err := s.DB.QueryContext(ctx, `SELECT `+nodeCols+` FROM nodes
-		WHERE owner_id=$1 AND deleted_at IS NULL AND NOT is_dir
+		WHERE owner_id=$1 AND deleted_at IS NULL AND NOT is_dir AND NOT e2e
 		ORDER BY updated_at DESC LIMIT $2`, uid, limit)
 	if err != nil {
 		return nil, err
@@ -226,8 +226,14 @@ func (s *Service) Mkdir(ctx context.Context, uid int64, parent *string, name str
 	if err := s.checkDir(ctx, s.DB, uid, parent); err != nil {
 		return nil, err
 	}
-	n, err := scanNode(s.DB.QueryRowContext(ctx, `INSERT INTO nodes (id, owner_id, parent_id, name, is_dir)
-		VALUES ($1,$2,$3,$4,TRUE) RETURNING `+nodeCols, NewID(), uid, parent, name))
+	if e, err := dirE2E(ctx, s.DB, parent); err != nil {
+		return nil, err
+	} else if e && !e2eName(name) {
+		return nil, ErrE2EPlain // настоящее имя папки должно лежать в зашифрованных метаданных, а не на сервере
+	}
+	// e2e наследуется от родителя: всё внутри E2E-папки — шифротекст клиента
+	n, err := scanNode(s.DB.QueryRowContext(ctx, `INSERT INTO nodes (id, owner_id, parent_id, name, is_dir, e2e)
+		VALUES ($1,$2,$3,$4,TRUE, COALESCE((SELECT e2e FROM nodes WHERE id=$3), FALSE)) RETURNING `+nodeCols, NewID(), uid, parent, name))
 	if isUniqueViolation(err) {
 		return nil, ErrExists
 	}
@@ -379,6 +385,9 @@ func (s *Service) WriteFile(ctx context.Context, uid int64, parent *string, name
 }
 
 func (s *Service) writeSpooled(ctx context.Context, uid int64, parent *string, name string, sp *spooled, o WriteOpts) (*Node, error) {
+	if err := s.checkE2EWrite(ctx, parent, name, sp); err != nil {
+		return nil, err
+	}
 	if err := s.checkQuota(ctx, uid, sp.size); err != nil {
 		return nil, err
 	}
@@ -439,8 +448,9 @@ func (s *Service) commitWrite(ctx context.Context, uid int64, parent *string, na
 			return nil, ErrConflict
 		}
 		nodeID = NewID()
-		if _, err := tx.ExecContext(ctx, `INSERT INTO nodes (id, owner_id, parent_id, name, is_dir, size, mime, current_version_id, taken_at, media_checked)
-			VALUES ($1,$2,$3,$4,FALSE,$5,$6,$7,$8,TRUE)`, nodeID, uid, parent, name, sp.size, sp.mime, vid, sp.taken); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO nodes (id, owner_id, parent_id, name, is_dir, size, mime, current_version_id, taken_at, media_checked, e2e)
+			VALUES ($1,$2,$3,$4,FALSE,$5,$6,$7,$8,TRUE, COALESCE((SELECT e2e FROM nodes WHERE id=$3), FALSE))`,
+			nodeID, uid, parent, name, sp.size, sp.mime, vid, sp.taken); err != nil {
 			if isUniqueViolation(err) {
 				return nil, ErrExists
 			}
@@ -564,6 +574,15 @@ func (s *Service) Move(ctx context.Context, uid int64, id string, newParent *str
 	if err := s.checkDir(ctx, tx, uid, newParent); err != nil {
 		return nil, err
 	}
+	if err := s.checkE2EMove(ctx, tx, n, newParent); err != nil {
+		return nil, err
+	}
+	// внутри E2E-папки настоящее имя — только в метаданных; на сервере остаётся случайное
+	if d, err := dirE2E(ctx, tx, newParent); err != nil {
+		return nil, err
+	} else if d && !e2eName(newName) {
+		return nil, ErrE2EPlain
+	}
 	res, err := scanNode(tx.QueryRowContext(ctx, `UPDATE nodes SET parent_id=$1, name=$2, updated_at=now()
 		WHERE id=$3 AND owner_id=$4 AND deleted_at IS NULL RETURNING `+nodeCols, newParent, newName, id, uid))
 	if isUniqueViolation(err) {
@@ -573,6 +592,71 @@ func (s *Service) Move(ctx context.Context, uid int64, id string, newParent *str
 		return nil, err
 	}
 	return res, tx.Commit()
+}
+
+// dirE2E — лежит ли содержимое папки parent в E2E (nil — корень, обычный).
+func dirE2E(ctx context.Context, q querier, parent *string) (bool, error) {
+	if parent == nil {
+		return false, nil
+	}
+	var e bool
+	err := q.QueryRowContext(ctx, `SELECT e2e FROM nodes WHERE id=$1`, *parent).Scan(&e)
+	return e, err
+}
+
+// checkE2EMove: внутри E2E-дерева перемещать можно (метаданные обновляет клиент), через границу — нет:
+// у сервера нет ключей, чтобы зашифровать обычный файл или расшифровать E2E-файл.
+// Исключение — сама E2E-папка (корень): её целиком можно перенести в другую обычную папку.
+func (s *Service) checkE2EMove(ctx context.Context, q querier, n *Node, newParent *string) error {
+	destE2E, err := dirE2E(ctx, q, newParent)
+	if err != nil {
+		return err
+	}
+	srcE2E, err := dirE2E(ctx, q, n.ParentID)
+	if err != nil {
+		return err
+	}
+	if n.E2E && !srcE2E { // корень E2E-папки
+		if destE2E {
+			return ErrE2EBoundary
+		}
+		return nil
+	}
+	if n.E2E != destE2E {
+		return ErrE2EBoundary
+	}
+	return nil
+}
+
+// e2eName — имя узла внутри E2E-папки: 32 шестнадцатеричных символа (случайное, его выбирает клиент).
+func e2eName(name string) bool {
+	if len(name) != 32 {
+		return false
+	}
+	for _, c := range name {
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// checkE2EWrite — в E2E-папку принимаем только шифротекст CloudBox: случайное имя и заголовок «CBE1».
+// Это защита от утечки открытого текста по ошибке: обычная загрузка, перетаскивание, сторонний
+// клиент через API — файл, положенный «в зашифрованную папку» без шифрования, был бы виден серверу.
+func (s *Service) checkE2EWrite(ctx context.Context, parent *string, name string, sp *spooled) error {
+	e, err := dirE2E(ctx, s.DB, parent)
+	if err != nil || !e {
+		return err
+	}
+	hdr := make([]byte, 4)
+	if !e2eName(name) || sp.size < 12+16 {
+		return ErrE2EPlain
+	}
+	if _, err := sp.f.ReadAt(hdr, 0); err != nil || string(hdr) != "CBE1" {
+		return ErrE2EPlain
+	}
+	return nil
 }
 
 // subtreeSize — суммарный размер текущих версий поддерева.
@@ -599,6 +683,12 @@ func (s *Service) CopyTo(ctx context.Context, srcOwner int64, id string, dstOwne
 	src, err := s.Get(ctx, srcOwner, id)
 	if err != nil {
 		return nil, err
+	}
+	// копию E2E-файла пришлось бы вписать в зашифрованные метаданные, а их может изменить только клиент
+	if destE2E, err := dirE2E(ctx, s.DB, newParent); err != nil {
+		return nil, err
+	} else if src.E2E || destE2E {
+		return nil, ErrE2EBoundary
 	}
 	if src.IsDir && newParent != nil && srcOwner == dstOwner {
 		if inside, err := s.IsInside(ctx, srcOwner, src.ID, *newParent); err != nil {
@@ -715,7 +805,7 @@ func (s *Service) ListTrash(ctx context.Context, uid int64) ([]Node, error) {
 		var n Node
 		var parent, ver, tp sql.NullString
 		var del, taken sql.NullTime
-		if err := rows.Scan(&n.ID, &n.OwnerID, &parent, &n.Name, &n.IsDir, &n.Size, &n.Mime, &ver, &n.CreatedAt, &n.UpdatedAt, &del, &n.Etag, &taken, &tp); err != nil {
+		if err := rows.Scan(&n.ID, &n.OwnerID, &parent, &n.Name, &n.IsDir, &n.Size, &n.Mime, &ver, &n.CreatedAt, &n.UpdatedAt, &del, &n.Etag, &taken, &n.E2E, &tp); err != nil {
 			return nil, err
 		}
 		if del.Valid {

@@ -58,6 +58,10 @@ func (s *Server) shareNode(w http.ResponseWriter, r *http.Request, sh *files.Sha
 		fail(w, err)
 		return nil
 	}
+	if n.E2E { // E2E-папка внутри расшаренной по ссылке: гостю там только шифротекст без ключа
+		writeErr(w, http.StatusNotFound, "не найдено")
+		return nil
+	}
 	return n
 }
 
@@ -125,6 +129,13 @@ func (s *Server) pubList(w http.ResponseWriter, r *http.Request) {
 		fail(w, err)
 		return
 	}
+	visible := items[:0]
+	for _, it := range items {
+		if !it.E2E {
+			visible = append(visible, it)
+		}
+	}
+	items = visible
 	// «Хлебные крошки» только в пределах расшаренной папки
 	anc, err := s.Files.Ancestors(r.Context(), sh.OwnerID, dir.ID)
 	if err != nil {
