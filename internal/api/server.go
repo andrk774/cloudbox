@@ -17,6 +17,7 @@ import (
 	"github.com/andrk774/cloudbox/internal/auth"
 	"github.com/andrk774/cloudbox/internal/config"
 	"github.com/andrk774/cloudbox/internal/files"
+	"github.com/andrk774/cloudbox/internal/mail"
 	"github.com/andrk774/cloudbox/internal/metrics"
 	"github.com/andrk774/cloudbox/internal/netx"
 	"github.com/andrk774/cloudbox/internal/oidc"
@@ -46,6 +47,7 @@ type Server struct {
 	Web    fs.FS
 	Talk   *talk.Service
 	ICE    talk.ICEConfig
+	Mail   *mail.Service
 
 	lim netx.Limiter
 }
@@ -181,6 +183,22 @@ func (s *Server) Handler() http.Handler {
 	h("POST /api/talk/rooms/{id}/call/join", s.need(s.talkJoin))
 	h("POST /api/talk/rooms/{id}/call/leave", s.need(s.talkLeave))
 	h("POST /api/talk/rooms/{id}/call/signal", s.need(s.talkSignal))
+
+	// --- почта
+	h("GET /api/mail", s.need(s.mailInfo))
+	h("GET /api/mail/preset", s.need(s.mailPreset))
+	h("GET /api/mail/accounts", s.need(s.mailAccounts))
+	h("POST /api/mail/accounts", s.need(s.mailAddAccount))
+	h("DELETE /api/mail/accounts/{id}", s.need(s.mailDeleteAccount))
+	h("GET /api/mail/accounts/{id}/folders", s.need(s.mailFolders))
+	h("GET /api/mail/accounts/{id}/messages", s.need(s.mailMessages))
+	h("GET /api/mail/accounts/{id}/message", s.need(s.mailMessage))
+	h("GET /api/mail/accounts/{id}/attachment", s.need(s.mailAttachment))
+	h("POST /api/mail/accounts/{id}/attachment/save", s.need(s.mailSaveAttachment))
+	h("POST /api/mail/accounts/{id}/flag", s.need(s.mailFlag))
+	h("POST /api/mail/accounts/{id}/move", s.need(s.mailMove))
+	h("POST /api/mail/accounts/{id}/delete", s.need(s.mailDelete))
+	h("POST /api/mail/accounts/{id}/send", s.need(s.mailSend))
 
 	// --- администрирование
 	h("GET /api/admin/users", s.admin(s.adminListUsers))
@@ -507,7 +525,8 @@ func okJSON(w http.ResponseWriter) { writeJSON(w, 200, map[string]bool{"ok": tru
 // fail переводит доменные ошибки в HTTP-коды.
 func fail(w http.ResponseWriter, err error) {
 	switch {
-	case errors.Is(err, files.ErrNotFound), errors.Is(err, auth.ErrNotFound), errors.Is(err, pim.ErrNotFound), errors.Is(err, talk.ErrNotFound):
+	case errors.Is(err, files.ErrNotFound), errors.Is(err, auth.ErrNotFound), errors.Is(err, pim.ErrNotFound), errors.Is(err, talk.ErrNotFound),
+		errors.Is(err, mail.ErrNotFound), errors.Is(err, mail.ErrNoSuchMsg), errors.Is(err, mail.ErrNoAttachment):
 		writeErr(w, http.StatusNotFound, err.Error())
 	case errors.Is(err, files.ErrExists), errors.Is(err, auth.ErrUserExists), errors.Is(err, files.ErrShared), errors.Is(err, files.ErrTagExists):
 		writeErr(w, http.StatusConflict, err.Error())

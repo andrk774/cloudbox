@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -31,6 +32,7 @@ import (
 	"github.com/andrk774/cloudbox/internal/dav"
 	"github.com/andrk774/cloudbox/internal/db"
 	"github.com/andrk774/cloudbox/internal/files"
+	"github.com/andrk774/cloudbox/internal/mail"
 	"github.com/andrk774/cloudbox/internal/netx"
 	"github.com/andrk774/cloudbox/internal/oidc"
 	"github.com/andrk774/cloudbox/internal/pim"
@@ -92,8 +94,9 @@ func main() {
 	pimSvc := &pim.Service{DB: database, Loc: loc}
 	srv := &api.Server{
 		Cfg: cfg, DB: database, Auth: authSvc, Files: fileSvc, PIM: pimSvc, Web: web.FS(),
-		Talk: &talk.Service{DB: database, Hub: talk.NewHub()},
-		ICE:  talk.ICEConfig{STUN: talk.SplitList(cfg.STUNURLs), TURN: talk.SplitList(cfg.TURNURLs), Secret: cfg.TURNSecret},
+		Talk:   &talk.Service{DB: database, Hub: talk.NewHub()},
+		Mail:   mailService(database, cfg),
+		ICE:    talk.ICEConfig{STUN: talk.SplitList(cfg.STUNURLs), TURN: talk.SplitList(cfg.TURNURLs), Secret: cfg.TURNSecret},
 		DAV:    &dav.Handler{Auth: authSvc, Files: fileSvc, TmpDir: cfg.TmpDir},
 		PIMDAV: &pim.Handler{Auth: authSvc, Svc: pimSvc},
 		WOPI: &wopi.Server{Files: fileSvc, Cfg: wopi.Config{EditorURL: cfg.WOPIEditorURL, DiscoveryURL: cfg.WOPIDiscoveryURL,
@@ -333,4 +336,21 @@ func cmdRestore(ctx context.Context, cfg config.Config, args []string) error {
 	}
 	fmt.Printf("восстановлено: база данных и %d файлов в хранилище %s\n", n, strings.ToUpper(cfg.Storage))
 	return nil
+}
+
+// mailService — почта шифрует пароли ящиков ключом из CB_SECRET. Если секрет сгенерирован при запуске,
+// после перезапуска пароли не расшифровать — почта в таком режиме отключена.
+func mailService(db *sql.DB, cfg config.Config) *mail.Service {
+	secret := cfg.Secret
+	if cfg.SecretGenerated {
+		secret = ""
+		slog.Warn("почта отключена: задайте постоянный CB_SECRET")
+	}
+	var ports []int
+	for _, p := range strings.Split(cfg.MailExtraPorts, ",") {
+		if n, err := strconv.Atoi(strings.TrimSpace(p)); err == nil && n > 0 && n < 65536 {
+			ports = append(ports, n)
+		}
+	}
+	return mail.NewService(db, &mail.Dialer{AllowPrivate: cfg.MailAllowPrivate, ExtraPorts: ports}, secret)
 }
