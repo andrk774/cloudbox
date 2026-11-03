@@ -5,10 +5,12 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"log"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 )
 
@@ -91,8 +93,21 @@ func (s *Service) GetUpload(ctx context.Context, actor int64, id string) (*Uploa
 	return &u, nil
 }
 
+// uploadLocks сериализуют запись частей одной загрузки (клиент может повторить запрос, не дождавшись ответа).
+// Фиксированный набор мьютексов по хешу id — без карты, которую пришлось бы чистить.
+var uploadLocks [64]sync.Mutex
+
+func uploadLock(id string) *sync.Mutex {
+	h := fnv.New32a()
+	h.Write([]byte(id))
+	return &uploadLocks[h.Sum32()%uint32(len(uploadLocks))]
+}
+
 // AppendUpload дописывает часть по смещению offset. Повтор уже принятой части безопасен.
 func (s *Service) AppendUpload(ctx context.Context, actor int64, id string, offset int64, r io.Reader) (*Upload, error) {
+	mu := uploadLock(id)
+	mu.Lock()
+	defer mu.Unlock()
 	u, err := s.GetUpload(ctx, actor, id)
 	if err != nil {
 		return nil, err
@@ -118,8 +133,13 @@ func (s *Service) AppendUpload(ctx context.Context, actor int64, id string, offs
 		f.Sync()
 	}
 	newRecv := offset + n
-	if _, uerr := s.DB.ExecContext(ctx, `UPDATE uploads SET received=$1, updated_at=now() WHERE id=$2 AND received=$3`, newRecv, id, offset); uerr != nil {
+	res, uerr := s.DB.ExecContext(ctx, `UPDATE uploads SET received=$1, updated_at=now() WHERE id=$2 AND received=$3`, newRecv, id, offset)
+	if uerr != nil {
 		return nil, uerr
+	}
+	if k, _ := res.RowsAffected(); k == 0 {
+		// Смещение успело измениться (другой экземпляр сервера или удалённая загрузка) — клиент запросит актуальное.
+		return u, ErrOffset
 	}
 	u.Received = newRecv
 	return u, err
@@ -127,6 +147,9 @@ func (s *Service) AppendUpload(ctx context.Context, actor int64, id string, offs
 
 // CompleteUpload превращает собранный файл в версию. Права проверяются вызывающим повторно.
 func (s *Service) CompleteUpload(ctx context.Context, actor int64, id string) (*Node, *Upload, error) {
+	mu := uploadLock(id)
+	mu.Lock()
+	defer mu.Unlock()
 	u, err := s.GetUpload(ctx, actor, id)
 	if err != nil {
 		return nil, nil, err

@@ -131,7 +131,8 @@ func (s *Service) EnableTOTP(ctx context.Context, uid int64, code string) ([]str
 	if enabled {
 		return nil, errors.New("двухфакторная аутентификация уже включена")
 	}
-	if sec == "" || !secure.VerifyTOTP(sec, code, time.Now()) {
+	step, ok := secure.VerifyTOTPStep(sec, code, time.Now())
+	if sec == "" || !ok {
 		return nil, ErrBadCode
 	}
 	codes := secure.RecoveryCodes(10)
@@ -139,7 +140,9 @@ func (s *Service) EnableTOTP(ctx context.Context, uid int64, code string) ([]str
 	for i, c := range codes {
 		hashes[i] = secure.SHA256Hex(c)
 	}
-	if _, err := s.DB.ExecContext(ctx, `UPDATE users SET totp_enabled=TRUE, recovery_codes=$1 WHERE id=$2`, pq.Array(hashes), uid); err != nil {
+	// Код подтверждения сразу считается использованным — им же нельзя войти.
+	if _, err := s.DB.ExecContext(ctx, `UPDATE users SET totp_enabled=TRUE, recovery_codes=$1, totp_last_step=$3 WHERE id=$2`,
+		pq.Array(hashes), uid, step); err != nil {
 		return nil, err
 	}
 	s.flushBasic(uid)
@@ -147,7 +150,7 @@ func (s *Service) EnableTOTP(ctx context.Context, uid int64, code string) ([]str
 }
 
 func (s *Service) DisableTOTP(ctx context.Context, uid int64) error {
-	_, err := s.DB.ExecContext(ctx, `UPDATE users SET totp_enabled=FALSE, totp_secret='', recovery_codes='{}' WHERE id=$1`, uid)
+	_, err := s.DB.ExecContext(ctx, `UPDATE users SET totp_enabled=FALSE, totp_secret='', recovery_codes='{}', totp_last_step=0 WHERE id=$1`, uid)
 	s.flushBasic(uid)
 	return err
 }
@@ -163,17 +166,30 @@ func (s *Service) CheckSecondFactor(ctx context.Context, uid int64, code string)
 		}
 		return false, err
 	}
-	if secure.VerifyTOTP(sec, code, time.Now()) {
-		return true, nil
+	if step, ok := secure.VerifyTOTPStep(sec, code, time.Now()); ok {
+		// Принимаем код, только если его интервал новее последнего принятого. Условие в UPDATE делает
+		// проверку атомарной: из двух одновременных запросов с одним кодом пройдёт только один.
+		return s.consume(ctx, `UPDATE users SET totp_last_step=$1 WHERE id=$2 AND totp_last_step < $1`, step, uid)
 	}
 	h := secure.SHA256Hex(secure.NormalizeRecovery(code))
 	for _, c := range codes {
 		if secure.Equal(c, h) {
-			_, err := s.DB.ExecContext(ctx, `UPDATE users SET recovery_codes=array_remove(recovery_codes, $1) WHERE id=$2`, h, uid)
-			return err == nil, err
+			// Код восстановления сгорает атомарно: повторный (в т.ч. параллельный) запрос его уже не найдёт.
+			return s.consume(ctx, `UPDATE users SET recovery_codes=array_remove(recovery_codes, $1)
+				WHERE id=$2 AND $1 = ANY(recovery_codes)`, h, uid)
 		}
 	}
 	return false, nil
+}
+
+// consume выполняет условный UPDATE и сообщает, затронул ли он строку.
+func (s *Service) consume(ctx context.Context, q string, args ...any) (bool, error) {
+	res, err := s.DB.ExecContext(ctx, q, args...)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
 }
 
 func (s *Service) RecoveryCodesLeft(ctx context.Context, uid int64) int {

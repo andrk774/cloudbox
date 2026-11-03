@@ -12,7 +12,6 @@ import (
 	"io"
 	"io/fs"
 	"log"
-	"net"
 	"net/http"
 	"os"
 	"path"
@@ -23,6 +22,7 @@ import (
 
 	"github.com/andrk774/cloudbox/internal/auth"
 	"github.com/andrk774/cloudbox/internal/files"
+	"github.com/andrk774/cloudbox/internal/netx"
 	"github.com/andrk774/cloudbox/internal/storage"
 	"golang.org/x/net/webdav"
 )
@@ -39,13 +39,13 @@ type Handler struct {
 
 	mu    sync.Mutex
 	locks map[int64]webdav.LockSystem
-	fails map[string]*failCounter
+	fails netx.Limiter
 }
 
-type failCounter struct {
-	n     int
-	reset time.Time
-}
+const (
+	maxFails   = 20
+	failWindow = 10 * time.Minute
+)
 
 func (h *Handler) lockSystem(uid int64) webdav.LockSystem {
 	h.mu.Lock()
@@ -61,41 +61,10 @@ func (h *Handler) lockSystem(uid int64) webdav.LockSystem {
 	return ls
 }
 
-// tooManyFails — защита от перебора паролей: 20 неудач за 10 минут с одного адреса.
-func (h *Handler) tooManyFails(ip string, add bool) bool {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if h.fails == nil {
-		h.fails = map[string]*failCounter{}
-	}
-	now := time.Now()
-	f, ok := h.fails[ip]
-	if !ok || now.After(f.reset) {
-		f = &failCounter{reset: now.Add(10 * time.Minute)}
-		h.fails[ip] = f
-	}
-	if add {
-		f.n++
-	}
-	return f.n >= 20
-}
-
-func remoteIP(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		host = r.RemoteAddr
-	}
-	if ip := net.ParseIP(host); ip != nil && (ip.IsLoopback() || ip.IsPrivate()) {
-		if xr := r.Header.Get("X-Real-IP"); xr != "" {
-			return xr
-		}
-	}
-	return host
-}
-
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	ip := remoteIP(r)
-	if h.tooManyFails(ip, false) {
+	// Защита от перебора паролей: 20 неудач за 10 минут с одного адреса.
+	ip := netx.ClientIP(r)
+	if h.fails.Blocked(ip, maxFails, failWindow) {
 		http.Error(w, "too many failed logins", http.StatusTooManyRequests)
 		return
 	}
@@ -107,12 +76,19 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if !ok || err != nil {
 		if ok {
-			h.tooManyFails(ip, true)
+			h.fails.Fail(ip, failWindow)
 			h.Auth.LogLogin(r.Context(), 0, user, ip, r.UserAgent(), false, "webdav")
 		}
 		w.Header().Set("WWW-Authenticate", `Basic realm="CloudBox", charset="UTF-8"`)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
+	}
+	// Заявленный размер PUT больше лимита или свободной квоты — отказываем сразу, не принимая тело.
+	if r.Method == http.MethodPut && r.ContentLength > 0 {
+		if max := h.Files.MaxUpload; max > 0 && r.ContentLength > max {
+			http.Error(w, files.ErrTooLarge.Error(), http.StatusRequestEntityTooLarge)
+			return
+		}
 	}
 	wd := &webdav.Handler{
 		Prefix:     Prefix,
@@ -356,11 +332,15 @@ func (f *userFS) OpenFile(ctx context.Context, name string, flag int, _ os.FileM
 		case err != nil && !errors.Is(err, files.ErrNotFound):
 			return nil, err
 		}
+		limit, err := f.writeLimit(ctx, l.owner)
+		if err != nil {
+			return nil, err
+		}
 		tmp, err := os.CreateTemp(f.tmp, "dav-*")
 		if err != nil {
 			return nil, err
 		}
-		return &writeFile{fs: f, ctx: ctx, owner: l.owner, parent: parent, name: base, tmp: tmp}, nil
+		return &writeFile{fs: f, ctx: ctx, owner: l.owner, parent: parent, name: base, tmp: tmp, limit: limit}, nil
 	}
 
 	l, err := f.resolve(ctx, name)
@@ -611,12 +591,47 @@ type writeFile struct {
 	name   string
 	tmp    *os.File
 	size   int64
+	limit  writeLimit
+	failed error // запись прервана — при Close ничего не сохраняем
 	closed bool
 }
 
+// writeLimit — сколько байт можно принять и какую ошибку вернуть при превышении.
+type writeLimit struct {
+	max int64 // < 0 — без ограничения
+	err error
+}
+
+// writeLimit — минимум из CB_MAX_UPLOAD_MB и свободного места в квоте владельца.
+// Без этого временный файл рос бы без ограничений, а квота проверялась бы только после приёма всего тела.
+func (f *userFS) writeLimit(ctx context.Context, owner int64) (writeLimit, error) {
+	l := writeLimit{max: -1}
+	if f.svc.MaxUpload > 0 {
+		l = writeLimit{max: f.svc.MaxUpload, err: files.ErrTooLarge}
+	}
+	used, quota, err := f.svc.Usage(ctx, owner)
+	if err != nil {
+		return l, err
+	}
+	if free := max(0, quota-used); quota > 0 && (l.max < 0 || free < l.max) {
+		l = writeLimit{max: free, err: files.ErrQuota}
+	}
+	return l, nil
+}
+
 func (f *writeFile) Write(p []byte) (int, error) {
+	if f.failed != nil {
+		return 0, f.failed
+	}
+	if f.limit.max >= 0 && f.size+int64(len(p)) > f.limit.max {
+		f.failed = f.limit.err
+		return 0, f.failed
+	}
 	n, err := f.tmp.Write(p)
 	f.size += int64(n)
+	if err != nil {
+		f.failed = err
+	}
 	return n, err
 }
 
@@ -635,6 +650,10 @@ func (f *writeFile) Close() error {
 	}
 	f.closed = true
 	defer func() { f.tmp.Close(); os.Remove(f.tmp.Name()) }()
+	if f.failed != nil {
+		// Тело принято не полностью: сохранять обрезанный файл нельзя.
+		return mapErr(f.failed)
+	}
 	// Файл уже на диске — передаём его ядру напрямую, без повторного копирования.
 	n, err := f.fs.svc.WriteFile(f.ctx, f.owner, f.parent, f.name, f.tmp)
 	if err == nil {

@@ -31,6 +31,7 @@ import (
 	"github.com/andrk774/cloudbox/internal/dav"
 	"github.com/andrk774/cloudbox/internal/db"
 	"github.com/andrk774/cloudbox/internal/files"
+	"github.com/andrk774/cloudbox/internal/netx"
 	"github.com/andrk774/cloudbox/internal/oidc"
 	"github.com/andrk774/cloudbox/internal/pim"
 	"github.com/andrk774/cloudbox/internal/storage"
@@ -64,7 +65,11 @@ func main() {
 	}
 	defer database.Close()
 
-	authSvc := &auth.Service{DB: database, DefaultQuota: cfg.DefaultQuotaMB << 20, Secret: cfg.Secret}
+	authSvc := &auth.Service{DB: database, DefaultQuota: cfg.DefaultQuotaMB << 20, Secret: cfg.Secret,
+		NoPasswordLogin: !cfg.PasswordLogin}
+	if err := netx.SetTrustedProxies(cfg.TrustedProxies); err != nil {
+		fatal(fmt.Errorf("CB_TRUSTED_PROXIES: %w", err))
+	}
 
 	if len(os.Args) > 1 {
 		if err := runCommand(ctx, cfg, database, authSvc, loc, os.Args[1:]); err != nil {

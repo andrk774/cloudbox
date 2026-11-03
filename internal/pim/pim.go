@@ -19,6 +19,7 @@ import (
 
 	"github.com/andrk774/cloudbox/internal/auth"
 	"github.com/andrk774/cloudbox/internal/files"
+	"github.com/andrk774/cloudbox/internal/netx"
 	"github.com/emersion/go-ical"
 	"github.com/emersion/go-vcard"
 	webdav "github.com/emersion/go-webdav"
@@ -215,11 +216,24 @@ func (s *Service) putObject(ctx context.Context, collID int64, name, uid, data s
 type Handler struct {
 	Auth *auth.Service
 	Svc  *Service
+
+	fails netx.Limiter
 }
 
 type ctxUser struct{}
 
+const (
+	maxFails   = 20
+	failWindow = 10 * time.Minute
+)
+
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Защита от перебора паролей, как у WebDAV: 20 неудач за 10 минут с одного адреса.
+	ip := netx.ClientIP(r)
+	if h.fails.Blocked(ip, maxFails, failWindow) {
+		http.Error(w, "too many failed logins", http.StatusTooManyRequests)
+		return
+	}
 	user, pass, ok := r.BasicAuth()
 	var u *auth.User
 	var err error
@@ -227,6 +241,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		u, err = h.Auth.CheckBasic(r.Context(), user, pass)
 	}
 	if !ok || err != nil {
+		if ok {
+			h.fails.Fail(ip, failWindow)
+			h.Auth.LogLogin(r.Context(), 0, user, ip, r.UserAgent(), false, "caldav")
+		}
 		w.Header().Set("WWW-Authenticate", `Basic realm="CloudBox", charset="UTF-8"`)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return

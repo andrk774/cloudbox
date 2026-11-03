@@ -49,6 +49,10 @@ type Service struct {
 	DB           *sql.DB
 	DefaultQuota int64  // байт
 	Secret       string // для подписи билетов второго шага входа
+	// NoPasswordLogin — вход по основному паролю отключён (CB_PASSWORD_LOGIN=false, только OIDC).
+	// Действует и на Basic-auth (WebDAV, CalDAV/CardDAV, API): работают только пароли приложений.
+	// Администраторов не касается — как и вход в веб-интерфейс, чтобы не потерять доступ к серверу.
+	NoPasswordLogin bool
 
 	mu        sync.Mutex
 	basicHits map[string]basicEntry // кэш проверок Basic-auth для WebDAV (PBKDF2 дорогой)
@@ -298,8 +302,9 @@ func (s *Service) CheckBasic(ctx context.Context, username, password string) (*U
 	}
 
 	u, err := s.Authenticate(ctx, username, password)
-	if err == nil && u.TOTP {
-		// При включённой 2FA основной пароль в WebDAV/API не работает — только пароли приложений.
+	if err == nil && (u.TOTP || (s.NoPasswordLogin && !u.IsAdmin)) {
+		// При включённой 2FA или входе только через OIDC основной пароль в WebDAV/API не работает —
+		// только пароли приложений.
 		u, err = nil, ErrBadCredentials
 	}
 	if errors.Is(err, ErrBadCredentials) {

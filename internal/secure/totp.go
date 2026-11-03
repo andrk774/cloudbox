@@ -50,21 +50,28 @@ func hotp(key []byte, counter uint64) string {
 
 // VerifyTOTP допускает расхождение часов на ±1 интервал (30 с).
 func VerifyTOTP(secret, code string, now time.Time) bool {
+	_, ok := VerifyTOTPStep(secret, code, now)
+	return ok
+}
+
+// VerifyTOTPStep — как VerifyTOTP, но возвращает номер принятого интервала.
+// Вызывающий должен запомнить его и не принимать интервалы не новее (защита от повтора кода).
+func VerifyTOTPStep(secret, code string, now time.Time) (int64, bool) {
 	code = strings.ReplaceAll(strings.TrimSpace(code), " ", "")
 	if len(code) != 6 {
-		return false
+		return 0, false
 	}
 	key, err := b32.DecodeString(strings.ToUpper(strings.ReplaceAll(secret, " ", "")))
 	if err != nil {
-		return false
+		return 0, false
 	}
-	step := uint64(now.Unix() / 30)
+	step := now.Unix() / 30
 	for _, d := range []int64{0, -1, 1} {
-		if Equal(hotp(key, uint64(int64(step)+d)), code) {
-			return true
+		if Equal(hotp(key, uint64(step+d)), code) {
+			return step + d, true
 		}
 	}
-	return false
+	return 0, false
 }
 
 // RecoveryCodes — одноразовые коды восстановления вида xxxx-xxxx.

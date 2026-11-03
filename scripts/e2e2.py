@@ -324,8 +324,16 @@ st, _ = y.j("GET", "/api/me")
 check(st == 401, "без кода сессии нет")
 st, _ = y.j("POST", "/api/auth/totp", {"ticket": l1["ticket"], "code": "123456"})
 check(st == 400, "неверный код → 400")
-st, l2 = y.j("POST", "/api/auth/totp", {"ticket": l1["ticket"], "code": totp(setup["secret"])})
+st, _ = y.j("POST", "/api/auth/totp", {"ticket": l1["ticket"], "code": totp(setup["secret"])})
+check(st == 400, "код, которым включали 2FA, повторно не принимается")
+# следующий интервал (сервер допускает расхождение часов ±30 с) — код ещё не использован
+code2 = totp(setup["secret"], time.time() + 30)
+st, l2 = y.j("POST", "/api/auth/totp", {"ticket": l1["ticket"], "code": code2})
 check(st == 200 and y.j("GET", "/api/me")[0] == 200, "вход по коду TOTP")
+yr = Client()
+t = yr.j("POST", "/api/auth/login", {"username": "petya", "password": "petya12345"})[1]["ticket"]
+st, _ = yr.j("POST", "/api/auth/totp", {"ticket": t, "code": code2})
+check(st == 400, "тот же код TOTP второй раз не принимается")
 rc = en["recovery_codes"][0]
 y2 = Client()
 t = y2.j("POST", "/api/auth/login", {"username": "petya", "password": "petya12345"})[1]["ticket"]
@@ -409,6 +417,27 @@ if me2.get("office_exts"):
     check(st == 200, "WOPI UNLOCK")
     st, _, _ = w.req("GET", "/wopi/files/%s?access_token=%s" % (doc["id"], token))
     check(st == 401, "токен одного файла не подходит к другому")
+
+    # Токен живёт часами: права участника шары пересчитываются на каждом WOPI-запросе
+    st, wsh = a.j("POST", "/api/user-shares", {"node_id": dx["id"], "user_id": users["masha"], "can_write": True})
+    check(st == 201, "владелец поделился документом с masha (запись)")
+    st, body, _ = m.req("GET", "/office/" + dx["id"])
+    mtok = re.search(rb'name="access_token" value="([^"]+)"', body)
+    check(st == 200 and mtok, "masha открыла документ в редакторе")
+    mtoken = urllib.parse.quote(mtok.group(1).decode())
+    st, info = w.j("GET", "/wopi/files/%s?access_token=%s" % (dx["id"], mtoken))
+    check(st == 200 and info["UserCanWrite"], "WOPI: masha может редактировать")
+    a.j("PATCH", "/api/user-shares/" + wsh["id"], {"can_write": False})
+    st, info = w.j("GET", "/wopi/files/%s?access_token=%s" % (dx["id"], mtoken))
+    check(st == 200 and not info["UserCanWrite"], "WOPI: после понижения до чтения UserCanWrite=false")
+    st, _, _ = w.req("POST", "/wopi/files/%s/contents?access_token=%s" % (dx["id"], mtoken), raw=minimal_docx("взлом"),
+                     headers={"X-WOPI-Override": "PUT"})
+    check(st == 401, "WOPI: сохранение старым токеном после понижения прав → 401")
+    a.j("DELETE", "/api/user-shares/" + wsh["id"])
+    st, _ = w.j("GET", "/wopi/files/%s?access_token=%s" % (dx["id"], mtoken))
+    check(st == 401, "WOPI: после отзыва доступа токен masha не работает")
+    st, body, _ = a.req("GET", "/api/files/%s/content" % dx["id"])
+    check(body == newdoc, "документ владельца не изменён")
 else:
     print("SKIP WOPI — сервер запущен без CB_WOPI_URL")
 

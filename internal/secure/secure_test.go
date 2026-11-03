@@ -47,3 +47,20 @@ func TestRecovery(t *testing.T) {
 		}
 	}
 }
+
+// VerifyTOTPStep возвращает интервал, к которому подошёл код, — по нему отсекается повтор.
+func TestTOTPStep(t *testing.T) {
+	secret := "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
+	now := time.Unix(1234567890, 0)
+	want := int64(1234567890 / 30)
+	if step, ok := VerifyTOTPStep(secret, "005924", now); !ok || step != want {
+		t.Fatalf("same step: %d %v", step, ok)
+	}
+	// тот же код через 30 с принимается как предыдущий интервал — шаг остаётся прежним
+	if step, ok := VerifyTOTPStep(secret, "005924", now.Add(30*time.Second)); !ok || step != want {
+		t.Fatalf("prev step: %d %v", step, ok)
+	}
+	if _, ok := VerifyTOTPStep(secret, "000000", now); ok {
+		t.Fatal("wrong code accepted")
+	}
+}
