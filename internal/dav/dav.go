@@ -210,6 +210,9 @@ func (f *userFS) resolve(ctx context.Context, p string) (*loc, error) {
 			if err != nil {
 				return nil, mapErr(err)
 			}
+			if n.E2E {
+				return nil, os.ErrNotExist
+			}
 			l.node, l.name = n, ""
 		}
 		return l, nil
@@ -217,6 +220,9 @@ func (f *userFS) resolve(ctx context.Context, p string) (*loc, error) {
 	n, err := f.svc.ResolvePath(ctx, f.uid, p)
 	if err != nil {
 		return nil, mapErr(err)
+	}
+	if n != nil && n.E2E { // E2E-папки — шифротекст со случайными именами, их открывает только веб-интерфейс
+		return nil, os.ErrNotExist
 	}
 	return &loc{owner: f.uid, node: n, write: true}, nil
 }
@@ -477,6 +483,9 @@ func (d *dirFile) load() error {
 		return mapErr(err)
 	}
 	for i := range l {
+		if l[i].E2E {
+			continue // E2E-папки в WebDAV не показываем: там шифротекст, которым управляет веб-клиент
+		}
 		if d.l.node == nil && l[i].Name == SharedDir {
 			continue // перекрыто виртуальной папкой
 		}

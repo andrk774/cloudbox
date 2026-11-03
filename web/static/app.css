@@ -485,3 +485,15 @@ textarea.editor { flex: 1; min-height: 300px; resize: none; font: 14px/1.55 ui-m
   .mail.has-msg { grid-template-rows: 1fr; }
   .mail-actions .lbl { display: none; }
 }
+
+/* ---------- зашифрованные (E2E) папки ---------- */
+.e2e-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+.e2e-badge { background: var(--sel); color: var(--accent); font-weight: 600; padding: 4px 10px; border-radius: 12px; }
+.e2e-list { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); }
+.e2e-row { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+.e2e-row:last-child { border-bottom: 0; }
+.e2e-row .ico { font-size: 20px; width: 26px; text-align: center; }
+.e2e-row .grow { flex: 1; min-width: 0; color: var(--text); overflow: hidden; text-overflow: ellipsis; }
+.e2e-row .sub { color: var(--muted); font-size: 12px; }
+.e2e-row.unknown { opacity: .75; }
+.e2e-recovery { font-family: ui-monospace, Consolas, monospace; font-size: 15px; letter-spacing: .5px; }

@@ -217,6 +217,9 @@ func (s *Service) ShareWith(ctx context.Context, owner int64, nodeID string, use
 	if err != nil {
 		return nil, err
 	}
+	if n.E2E {
+		return nil, ErrE2E // общий доступ к E2E требует обмена ключами — пока не поддерживается
+	}
 	if (userID == nil) == (groupID == nil) {
 		return nil, errors.New("укажите пользователя или группу")
 	}

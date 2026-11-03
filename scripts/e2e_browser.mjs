@@ -226,6 +226,41 @@ try {
     await A.eval(`api('DELETE', '/api/mail/accounts/${acc}')`);
   }
 
+  // ---------- E2E-папки: настоящее шифрование WebCrypto в браузере ----------
+  const r = await A.eval(`(async () => {
+    const rec = await e2eSetup('очень длинная кодовая фраза для теста');
+    const folder = await api('POST', '/api/e2e/folders', { parent: '', name: 'Сейф браузера' });
+    const text = 'Совершенно секретно: план похода. '.repeat(4000); // ~250 КБ — несколько сегментов по 64 КиБ
+    const node = await e2eUpload(new File([text], 'секрет.txt', { type: 'text/plain' }), folder.id);
+    const raw = new Uint8Array(await (await fetch('/api/files/' + node.id + '/content')).arrayBuffer());
+    const rawText = new TextDecoder().decode(raw);
+    const entry = (await e2eLoadMeta(folder.id)).meta.files[node.name];
+    const back = await (await e2eDecrypt(raw.buffer.slice(0), entry)).text();
+    const fails = async buf => { try { await e2eDecrypt(buf, entry); return false; } catch (_) { return true; } };
+    const t = raw.slice(); t[70000] ^= 1;                  // один байт во втором сегменте
+    const swapped = raw.slice(); swapped.set(raw.subarray(12, 12 + 65552), 12 + 65552); // сегмент 0 на место сегмента 1
+    // atob отдаёт байты как символы Latin-1 — ищем в них UTF-8 байты имени, а не саму кириллическую строку
+    const metaRaw = atob((await api('GET', '/api/e2e/meta/' + folder.id)).data.split('.')[1]);
+    const nameBytes = String.fromCharCode(...new TextEncoder().encode('секрет'));
+    E2E.vk = null;
+    let wrong = false; try { await e2eUnlock('не та фраза', false); } catch (_) { wrong = true; }
+    (await e2eUnlock(rec, true)).fill(0);
+    const nameAfterRecovery = (await e2eLoadMeta(folder.id)).meta.files[node.name].name;
+    return { folder: folder.id, name: node.name, magic: rawText.slice(0, 4), leaked: rawText.includes('Совершенно') || rawText.includes('секрет'),
+      size: raw.length, expected: e2eCipherSize(new TextEncoder().encode(text).length), ok: back === text,
+      tampered: await fails(t.buffer), truncated: await fails(raw.slice(0, raw.length - 40).buffer), swapped: await fails(swapped.buffer),
+      metaLeak: metaRaw.includes(nameBytes), metaLooksPlain: metaRaw.includes('"files"'), wrong, nameAfterRecovery, rec };
+  })()`);
+  check(/^[0-9a-f]{32}$/.test(r.name), 'E2E: на сервере случайное имя вместо настоящего (' + r.name + ')');
+  check(r.magic === 'CBE1' && !r.leaked && r.size === r.expected, 'E2E: на сервере только шифротекст ожидаемого размера, без открытого текста');
+  check(r.ok, 'E2E: файл из нескольких сегментов расшифровывается без искажений');
+  check(r.tampered && r.truncated && r.swapped, 'E2E: подмена байта, обрезка и перестановка сегментов обнаруживаются');
+  check(!r.metaLeak && !r.metaLooksPlain, 'E2E: метаданные на сервере зашифрованы — ни имени файла, ни структуры JSON');
+  check(r.wrong && r.nameAfterRecovery === 'секрет.txt', 'E2E: неверная фраза отвергается, ключ восстановления открывает папку');
+  check(/^([A-Z2-9]{4}-){12}[A-Z2-9]{4}$/.test(r.rec), 'E2E: ключ восстановления — 52 символа base32 группами по 4');
+  await A.eval(`location.hash = '#/e2e/${r.folder}'`);
+  check(await A.waitFor(`[...document.querySelectorAll('.e2e-row')].some(e => e.textContent.includes('секрет.txt'))`, 15000), 'E2E: окно папки показывает настоящее имя');
+
   check(A.errors.length === 0 && Bp.errors.length === 0, 'без ошибок JavaScript' + (A.errors.length + Bp.errors.length ? ': ' + [...A.errors, ...Bp.errors].join(' | ') : ''));
 } catch (e) {
   check(false, 'исключение: ' + e.message);
