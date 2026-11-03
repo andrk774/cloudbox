@@ -234,11 +234,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-	n, err := s.Files.Get(ctx, t.Owner, id)
-	if err != nil {
-		http.Error(w, "not found", http.StatusNotFound)
+	// Токен живёт часами, а доступ к чужому файлу могут отозвать или понизить до чтения —
+	// поэтому права пересчитываем на каждом запросе редактора, а не верим снимку в токене.
+	perm, n, err := s.Files.Access(ctx, t.UID, id)
+	if err != nil || perm.Owner != t.Owner {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
+	t.Write = t.Write && perm.Write
 	override := r.Header.Get("X-WOPI-Override")
 	switch {
 	case sub == "" && r.Method == http.MethodGet:

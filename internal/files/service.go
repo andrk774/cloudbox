@@ -15,6 +15,7 @@ import (
 	"path"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/andrk774/cloudbox/internal/media"
@@ -32,6 +33,9 @@ type Service struct {
 
 	kickOnce sync.Once
 	kick     chan struct{}
+
+	gcMu      sync.Mutex
+	gcPending atomic.Bool
 }
 
 type querier interface {
@@ -178,11 +182,15 @@ func (s *Service) Recent(ctx context.Context, uid int64, limit int) ([]Node, err
 
 // IsInside — лежит ли node внутри ancestor (или совпадает с ним). Нужно для публичных ссылок на папки.
 func (s *Service) IsInside(ctx context.Context, uid int64, ancestor, node string) (bool, error) {
+	return s.isInside(ctx, s.DB, uid, ancestor, node)
+}
+
+func (s *Service) isInside(ctx context.Context, q querier, uid int64, ancestor, node string) (bool, error) {
 	if !ValidID(node) {
 		return false, nil
 	}
 	var ok bool
-	err := s.DB.QueryRowContext(ctx, `
+	err := q.QueryRowContext(ctx, `
 		WITH RECURSIVE a AS (
 			SELECT id, parent_id FROM nodes WHERE id=$1 AND owner_id=$3 AND deleted_at IS NULL
 			UNION ALL
@@ -529,15 +537,23 @@ func (s *Service) Move(ctx context.Context, uid int64, id string, newParent *str
 	if err := ValidateName(newName); err != nil {
 		return nil, err
 	}
-	n, err := s.Get(ctx, uid, id)
+	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
-	if err := s.checkDir(ctx, s.DB, uid, newParent); err != nil {
+	defer tx.Rollback()
+	n, err := s.get(ctx, tx, uid, id)
+	if err != nil {
 		return nil, err
 	}
 	if n.IsDir && newParent != nil {
-		inside, err := s.IsInside(ctx, uid, n.ID, *newParent)
+		// Два параллельных перемещения (A → B и B → A) по отдельности проходят проверку, но вместе
+		// образуют цикл, на котором зациклятся рекурсивные запросы. Перемещения папок одного владельца
+		// выполняются по очереди, а проверка идёт внутри той же транзакции.
+		if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('cloudbox-move:' || $1::text, 0))`, uid); err != nil {
+			return nil, err
+		}
+		inside, err := s.isInside(ctx, tx, uid, n.ID, *newParent)
 		if err != nil {
 			return nil, err
 		}
@@ -545,12 +561,18 @@ func (s *Service) Move(ctx context.Context, uid int64, id string, newParent *str
 			return nil, ErrCycle
 		}
 	}
-	res, err := scanNode(s.DB.QueryRowContext(ctx, `UPDATE nodes SET parent_id=$1, name=$2, updated_at=now()
+	if err := s.checkDir(ctx, tx, uid, newParent); err != nil {
+		return nil, err
+	}
+	res, err := scanNode(tx.QueryRowContext(ctx, `UPDATE nodes SET parent_id=$1, name=$2, updated_at=now()
 		WHERE id=$3 AND owner_id=$4 AND deleted_at IS NULL RETURNING `+nodeCols, newParent, newName, id, uid))
 	if isUniqueViolation(err) {
 		return nil, ErrExists
 	}
-	return res, err
+	if err != nil {
+		return nil, err
+	}
+	return res, tx.Commit()
 }
 
 // subtreeSize — суммарный размер текущих версий поддерева.
@@ -809,6 +831,15 @@ func (s *Service) FreeName(ctx context.Context, uid int64, parent *string, name 
 
 // Purge удаляет узел из корзины навсегда.
 func (s *Service) Purge(ctx context.Context, uid int64, id string) error {
+	if err := s.purge(ctx, uid, id); err != nil {
+		return err
+	}
+	go s.GC(context.Background())
+	return nil
+}
+
+// purge — удаление без запуска GC (массовые операции запускают его один раз в конце).
+func (s *Service) purge(ctx context.Context, uid int64, id string) error {
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -838,11 +869,7 @@ func (s *Service) Purge(ctx context.Context, uid int64, id string) error {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM nodes WHERE id=$1`, tr.id); err != nil {
 		return err
 	}
-	if err := tx.Commit(); err != nil {
-		return err
-	}
-	go s.GC(context.Background())
-	return nil
+	return tx.Commit()
 }
 
 func (s *Service) EmptyTrash(ctx context.Context, uid int64) error {
@@ -850,8 +877,9 @@ func (s *Service) EmptyTrash(ctx context.Context, uid int64) error {
 	if err != nil {
 		return err
 	}
+	defer func() { go s.GC(context.Background()) }()
 	for _, it := range items {
-		if err := s.Purge(ctx, uid, it.ID); err != nil && !errors.Is(err, ErrNotFound) {
+		if err := s.purge(ctx, uid, it.ID); err != nil && !errors.Is(err, ErrNotFound) {
 			return err
 		}
 	}
@@ -881,9 +909,12 @@ func (s *Service) PurgeExpired(ctx context.Context, days int) {
 	}
 	rows.Close()
 	for _, it := range items {
-		if err := s.Purge(ctx, it.uid, it.id); err != nil && !errors.Is(err, ErrNotFound) {
+		if err := s.purge(ctx, it.uid, it.id); err != nil && !errors.Is(err, ErrNotFound) {
 			log.Println("trash cleanup:", err)
 		}
+	}
+	if len(items) > 0 {
+		s.GC(ctx)
 	}
 }
 
@@ -966,7 +997,22 @@ func (s *Service) queueGC(ctx context.Context, q querier, keys ...string) error 
 }
 
 // GC удаляет из хранилища блобы, на которые больше не ссылается ни одна версия.
+// Одновременно работает один проход; запрос во время прохода не теряется — проход повторится.
 func (s *Service) GC(ctx context.Context) {
+	s.gcPending.Store(true)
+	for s.gcPending.Load() {
+		if !s.gcMu.TryLock() {
+			return // текущий проход увидит gcPending и сделает ещё круг
+		}
+		for s.gcPending.Swap(false) {
+			s.gcPass(ctx)
+		}
+		s.gcMu.Unlock()
+		// запрос мог прийти между последней проверкой и Unlock — тогда внешний цикл подхватит его
+	}
+}
+
+func (s *Service) gcPass(ctx context.Context) {
 	for {
 		rows, err := s.DB.QueryContext(ctx, `SELECT blob_key FROM blob_gc ORDER BY queued_at LIMIT 200`)
 		if err != nil {

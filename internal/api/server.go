@@ -12,13 +12,13 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/andrk774/cloudbox/internal/auth"
 	"github.com/andrk774/cloudbox/internal/config"
 	"github.com/andrk774/cloudbox/internal/files"
 	"github.com/andrk774/cloudbox/internal/metrics"
+	"github.com/andrk774/cloudbox/internal/netx"
 	"github.com/andrk774/cloudbox/internal/oidc"
 	"github.com/andrk774/cloudbox/internal/pim"
 	"github.com/andrk774/cloudbox/internal/wopi"
@@ -38,8 +38,7 @@ type Server struct {
 	OIDC   *oidc.Provider
 	Web    fs.FS
 
-	limMu sync.Mutex
-	lim   map[string]*bucket
+	lim netx.Limiter
 }
 
 type ctxKey struct{}
@@ -441,52 +440,13 @@ func (s *Server) logAct(r *http.Request, owner int64, action string, n *files.No
 
 // ---------- ограничение частоты ----------
 
-type bucket struct {
-	n     int
-	reset time.Time
-}
-
 // allow — не более max попыток за окно window с одного IP для данного действия.
 func (s *Server) allow(r *http.Request, action string, max int, window time.Duration) bool {
-	key := action + "|" + clientIP(r)
-	s.limMu.Lock()
-	defer s.limMu.Unlock()
-	if s.lim == nil {
-		s.lim = map[string]*bucket{}
-	}
-	now := time.Now()
-	if len(s.lim) > 50000 {
-		for k, b := range s.lim {
-			if now.After(b.reset) {
-				delete(s.lim, k)
-			}
-		}
-	}
-	b, ok := s.lim[key]
-	if !ok || now.After(b.reset) {
-		b = &bucket{reset: now.Add(window)}
-		s.lim[key] = b
-	}
-	b.n++
-	return b.n <= max
+	return s.lim.Allow(action+"|"+clientIP(r), max, window)
 }
 
-func clientIP(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		host = r.RemoteAddr
-	}
-	// За обратным прокси (nginx/Caddy на той же машине или в docker-сети) берём X-Real-IP / X-Forwarded-For
-	if ip := net.ParseIP(host); ip != nil && (ip.IsLoopback() || ip.IsPrivate()) {
-		if xr := r.Header.Get("X-Real-IP"); xr != "" {
-			return xr
-		}
-		if xf := r.Header.Get("X-Forwarded-For"); xf != "" {
-			return strings.TrimSpace(strings.Split(xf, ",")[0])
-		}
-	}
-	return host
-}
+// clientIP — адрес клиента с учётом доверенных прокси (CB_TRUSTED_PROXIES).
+func clientIP(r *http.Request) string { return netx.ClientIP(r) }
 
 // ---------- JSON и ошибки ----------
 

@@ -105,6 +105,13 @@ st, cp = a.j("POST", f"/api/files/{foto['id']}/copy", {"parent": None})
 check(st == 201 and cp["name"] == "Фото (2)", "копия папки → " + cp.get("name", ""))
 st, s = a.j("GET", "/api/search?q=photo.png")
 check(len(s) == 2, "в копии есть файл")
+# перемещение папки в другую папку (идёт под advisory-блокировкой владельца) и обратно
+st, mv = a.j("PATCH", f"/api/files/{cp['id']}", {"parent": docs["id"]})
+check(st == 200 and mv["parent_id"] == docs["id"], f"перемещение папки в папку ({st})")
+st, _ = a.j("PATCH", f"/api/files/{docs['id']}", {"parent": cp["id"]})
+check(st == 400, "перемещение папки в собственную подпапку → 400")
+st, mv = a.j("PATCH", f"/api/files/{cp['id']}", {"parent": None})
+check(st == 200 and mv["parent_id"] is None, "папка возвращена в корень")
 
 # ZIP
 st, body, hdr = a.req("GET", f"/api/files/{foto['id']}/zip")
@@ -196,6 +203,13 @@ st, _, _ = c.req("PUT", "/dav/Заметки/todo.md", raw=b"# TODO\n- dav", hea
 check(st == 201, f"PUT нового файла ({st})")
 st, _, _ = c.req("PUT", "/dav/Заметки/todo.md", raw=b"# TODO v2", headers={"Authorization": auth})
 check(st in (201, 204), f"PUT перезапись ({st})")
+try:
+    st, _, _ = c.req("PUT", "/dav/Заметки/huge.bin", raw=b"\0" * (21 << 20), headers={"Authorization": auth})
+except (ConnectionError, urllib.error.URLError):
+    st = 413  # сервер ответил 413 и закрыл соединение, не дочитав тело, — клиент увидел обрыв
+check(st == 413, f"WebDAV: файл больше CB_MAX_UPLOAD_MB → 413 ({st})")
+st, _, _ = c.req("PROPFIND", "/dav/Заметки/huge.bin", headers={"Authorization": auth, "Depth": "0"})
+check(st == 404, "WebDAV: отклонённый файл не создан")
 st, body, _ = c.req("GET", "/dav/Заметки/todo.md", headers={"Authorization": auth})
 check(body == b"# TODO v2", "GET через WebDAV")
 s = a.j("GET", "/api/search?q=todo.md")[1]

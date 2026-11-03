@@ -92,11 +92,18 @@ func TestEncryptedTamperAndLegacy(t *testing.T) {
 	raw, _ := os.ReadFile(p)
 	raw[100] ^= 1
 	os.WriteFile(p, raw, 0o600)
-	b, err := enc.Get(ctx, "aabbccdd01")
-	if err != nil {
-		t.Fatal(err)
+	// Блобы обязательно закрываем: на Windows открытый файл не даёт t.TempDir() удалить каталог.
+	get := func(s *Encrypted, key string) Blob {
+		t.Helper()
+		b, err := s.Get(ctx, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { b.Close() })
+		return b
 	}
-	if _, err := io.ReadAll(b); err == nil {
+
+	if _, err := io.ReadAll(get(enc, "aabbccdd01")); err == nil {
 		t.Fatal("tampered blob decrypted without error")
 	}
 
@@ -105,26 +112,20 @@ func TestEncryptedTamperAndLegacy(t *testing.T) {
 	p2 := filepath.Join(dir, "aa", "bb", "aabbccdd02")
 	raw, _ = os.ReadFile(p2)
 	os.WriteFile(p2, raw[:headerSize+segCipher], 0o600) // оставили только первый сегмент
-	b, _ = enc.Get(ctx, "aabbccdd02")
-	if _, err := io.ReadAll(b); err == nil {
+	if _, err := io.ReadAll(get(enc, "aabbccdd02")); err == nil {
 		t.Fatal("truncated blob decrypted without error")
 	}
 
 	// чужой ключ
 	other, _ := NewEncrypted(local, "ff"+testKey[2:])
 	enc.Put(ctx, "aabbccdd03", bytes.NewReader(data), int64(len(data)))
-	b, _ = other.Get(ctx, "aabbccdd03")
-	if _, err := io.ReadAll(b); err == nil {
+	if _, err := io.ReadAll(get(other, "aabbccdd03")); err == nil {
 		t.Fatal("wrong key decrypted")
 	}
 
 	// старый незашифрованный блоб читается как есть
 	local.Put(ctx, "aabbccdd04", bytes.NewReader([]byte("plain old data")), 14)
-	b, err = enc.Get(ctx, "aabbccdd04")
-	if err != nil {
-		t.Fatal(err)
-	}
-	got, _ := io.ReadAll(b)
+	got, _ := io.ReadAll(get(enc, "aabbccdd04"))
 	if string(got) != "plain old data" {
 		t.Fatalf("legacy blob: %q", got)
 	}

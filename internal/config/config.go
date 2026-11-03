@@ -8,6 +8,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
+
+	"github.com/andrk774/cloudbox/internal/netx"
 )
 
 type Config struct {
@@ -47,6 +49,9 @@ type Config struct {
 	OIDCAutoCreate   bool
 	OIDCLinkByName   bool
 	PasswordLogin    bool // false — вход только через OIDC
+
+	// TrustedProxies — CIDR через запятую, от которых принимаются X-Real-IP/X-Forwarded-For; "none" — никому.
+	TrustedProxies string
 
 	WOPIEditorURL    string
 	WOPIDiscoveryURL string
@@ -90,6 +95,7 @@ func Load() Config {
 		OIDCAutoCreate:   envBool("CB_OIDC_AUTO_CREATE", true),
 		OIDCLinkByName:   envBool("CB_OIDC_LINK_BY_USERNAME", false),
 		PasswordLogin:    envBool("CB_PASSWORD_LOGIN", true),
+		TrustedProxies:   env("CB_TRUSTED_PROXIES", netx.DefaultTrustedProxies),
 
 		WOPIEditorURL:    strings.TrimRight(env("CB_WOPI_URL", ""), "/"),
 		WOPIDiscoveryURL: env("CB_WOPI_DISCOVERY_URL", ""),
