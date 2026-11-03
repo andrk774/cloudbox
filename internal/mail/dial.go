@@ -49,14 +49,19 @@ func (d *Dialer) timeout() time.Duration {
 	return 15 * time.Second
 }
 
-// blocked — адреса, к которым нельзя подключаться без AllowPrivate.
+// forbidden — адреса, к которым нельзя подключаться никогда, даже при AllowPrivate:
+// link-local (169.254.169.254 — метаданные облака с ключами доступа машины), multicast, 0.0.0.0/8.
+func forbidden(ip net.IP) bool {
+	return ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast() ||
+		ip.IsInterfaceLocalMulticast() || (ip.To4() != nil && ip.To4()[0] == 0)
+}
+
+// blocked — частные адреса: локальная сеть, loopback, CGNAT. Разрешаются только при AllowPrivate
+// (свой почтовый сервер в локальной сети, Proton Mail Bridge на localhost).
 func blocked(ip net.IP) bool {
-	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
-		ip.IsUnspecified() || ip.IsMulticast() || ip.IsInterfaceLocalMulticast() ||
+	return ip.IsLoopback() || ip.IsPrivate() ||
 		// 100.64.0.0/10 — CGNAT, часто внутренние сети провайдеров и облаков
-		(ip.To4() != nil && ip.To4()[0] == 100 && ip.To4()[1]&0xc0 == 64) ||
-		// 0.0.0.0/8
-		(ip.To4() != nil && ip.To4()[0] == 0)
+		(ip.To4() != nil && ip.To4()[0] == 100 && ip.To4()[1]&0xc0 == 64)
 }
 
 // CheckSecurity — допустим ли выбранный способ защиты.
@@ -110,6 +115,10 @@ func (d *Dialer) Dial(ctx context.Context, host string, port int, sec string) (n
 	}
 	var lastErr error
 	for _, ip := range ips {
+		if forbidden(ip) {
+			lastErr = ErrBlockedHost
+			continue
+		}
 		priv := blocked(ip)
 		if priv && !d.AllowPrivate {
 			lastErr = ErrBlockedHost

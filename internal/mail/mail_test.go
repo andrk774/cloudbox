@@ -234,6 +234,12 @@ func TestDialerSafety(t *testing.T) {
 	if _, err := loose.Dial(ctx, "8.8.8.8", 143, SecNone); !errors.Is(err, ErrPlaintext) {
 		t.Errorf("пароль открытым текстом в интернет: %v", err)
 	}
+	// разрешение локальной сети не открывает метаданные облака и прочие служебные адреса
+	for _, host := range []string{"169.254.169.254", "fe80::1", "0.0.0.0", "224.0.0.1"} {
+		if _, err := loose.Dial(ctx, host, 993, SecTLS); !errors.Is(err, ErrBlockedHost) {
+			t.Errorf("%s при AllowPrivate: должен быть запрещён, получено %v", host, err)
+		}
+	}
 	if err := strict.CheckSecurity("ssl3"); err == nil {
 		t.Error("неизвестный способ защиты")
 	}
