@@ -55,6 +55,8 @@ jobs:
           CB_DEFAULT_QUOTA_MB: 50
           CB_MAX_UPLOAD_MB: 20
           CB_WOPI_URL: http://127.0.0.1:9980
+          # e2e2.py сверяет дату EXIF без смещения в UTC; без этого сервер взял бы пояс по умолчанию (Asia/Yekaterinburg)
+          CB_TZ: UTC
         run: |
           mkdir -p "$CB_TMP_DIR"
           ./cloudbox > server.log 2>&1 &
