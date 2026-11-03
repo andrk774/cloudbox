@@ -1,0 +1,186 @@
+// Сквозной тест чата и видеозвонка в настоящем браузере.
+//
+//   CB_URL=http://127.0.0.1:8080 node scripts/e2e_browser.mjs
+//
+// Запускает Chrome без окна с поддельными камерой и микрофоном, открывает две вкладки от разных
+// пользователей и проверяет: сообщение доходит, входящий звонок показывается, WebRTC соединяется
+// и видео с другой стороны действительно идёт. Управление — Chrome DevTools Protocol (без зависимостей).
+//
+// Вход — Basic-авторизация через заголовок, а не /api/auth/login: у входа по паролю лимит
+// 10 попыток за 5 минут с IP, и в CI его расходуют другие сценарии.
+// Переменные: CHROME — путь к браузеру, SHOT — куда сохранить снимок экрана звонка.
+import { spawn, execFileSync } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+const B = process.env.CB_URL || 'http://127.0.0.1:8080';
+const PORT = 9333;
+let fails = 0;
+const check = (cond, msg) => { console.log((cond ? 'OK   ' : 'FAIL ') + msg); if (!cond) fails++; };
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const basic = (u, p) => 'Basic ' + Buffer.from(`${u}:${p}`).toString('base64');
+
+function findChrome() {
+  if (process.env.CHROME) return process.env.CHROME;
+  const win = ['C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe', 'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe'];
+  for (const p of win) if (existsSync(p)) return p;
+  for (const n of ['google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser']) {
+    try { return execFileSync('which', [n]).toString().trim(); } catch (_) {}
+  }
+  throw new Error('Chrome не найден — укажите путь в CHROME');
+}
+
+// ---------- минимальный клиент DevTools Protocol ----------
+class CDP {
+  constructor(url) {
+    this.ws = new WebSocket(url);
+    this.id = 0; this.pending = new Map(); this.handlers = [];
+    this.ws.onmessage = e => {
+      const m = JSON.parse(e.data);
+      if (m.id && this.pending.has(m.id)) {
+        const { res, rej } = this.pending.get(m.id); this.pending.delete(m.id);
+        m.error ? rej(new Error(m.error.message)) : res(m.result);
+      } else if (m.method) for (const h of this.handlers) h(m);
+    };
+    this.ready = new Promise((res, rej) => { this.ws.onopen = res; this.ws.onerror = rej; });
+  }
+  send(method, params = {}, sessionId) {
+    const id = ++this.id;
+    this.ws.send(JSON.stringify({ id, method, params, sessionId }));
+    return new Promise((res, rej) => this.pending.set(id, { res, rej }));
+  }
+}
+
+class Page {
+  constructor(cdp, sessionId, name) { this.cdp = cdp; this.s = sessionId; this.name = name; this.errors = []; }
+  send(m, p) { return this.cdp.send(m, p, this.s); }
+  async eval(expr) {
+    const r = await this.send('Runtime.evaluate', { expression: expr, awaitPromise: true, returnByValue: true });
+    if (r.exceptionDetails) throw new Error(`${this.name}: ${r.exceptionDetails.exception?.description || r.exceptionDetails.text}`);
+    return r.result.value;
+  }
+  async waitFor(expr, timeout = 10000) {
+    const end = Date.now() + timeout;
+    while (Date.now() < end) {
+      try { if (await this.eval(expr)) return true; } catch (_) {}
+      await sleep(200);
+    }
+    return false;
+  }
+}
+
+async function openPage(cdp, name, auth) {
+  const { browserContextId } = await cdp.send('Target.createBrowserContext'); // отдельные cookie для каждого пользователя
+  const { targetId } = await cdp.send('Target.createTarget', { url: 'about:blank', browserContextId });
+  const { sessionId } = await cdp.send('Target.attachToTarget', { targetId, flatten: true });
+  const p = new Page(cdp, sessionId, name);
+  cdp.handlers.push(m => {
+    if (m.sessionId !== sessionId) return;
+    if (m.method === 'Runtime.exceptionThrown') p.errors.push(m.params.exceptionDetails.exception?.description || m.params.exceptionDetails.text);
+  });
+  await p.send('Runtime.enable');
+  await p.send('Page.enable');
+  await p.send('Network.enable');
+  await p.send('Network.setExtraHTTPHeaders', { headers: { Authorization: auth } });
+  await p.send('Emulation.setFocusEmulationEnabled', { enabled: true }); // вкладка «видима»: иначе сообщения не отмечаются прочитанными
+  await p.send('Browser.grantPermissions', { origin: new URL(B).origin, permissions: ['videoCapture', 'audioCapture'], browserContextId }).catch(() => {});
+  await p.send('Page.navigate', { url: B + '/#/talk' });
+  return p;
+}
+
+async function api(method, path, auth, body) {
+  const r = await fetch(B + path, { method, headers: { Authorization: auth, 'Content-Type': 'application/json' }, body: body && JSON.stringify(body) });
+  const t = await r.text();
+  let data = null; try { data = JSON.parse(t); } catch (_) {}
+  return { status: r.status, data };
+}
+
+// ---------- пользователи ----------
+const admin = basic('andrey', 'secret123');
+let me = await api('GET', '/api/me', admin);
+if (me.status === 401) { await api('POST', '/api/auth/register', admin, { username: 'andrey', password: 'secret123' }); me = await api('GET', '/api/me', admin); }
+check(me.status === 200, 'администратор доступен');
+const users = { ana: ['web_ana', 'ana-12345'], bob: ['web_bob', 'bob-12345'] };
+for (const [u, p] of Object.values(users)) await api('POST', '/api/admin/users', admin, { username: u, password: p });
+const list = (await api('GET', '/api/admin/users', admin)).data;
+const bobId = list.find(x => x.username === 'web_bob')?.id;
+check(!!bobId, 'созданы пользователи для браузерного теста');
+
+// ---------- браузер ----------
+const profile = mkdtempSync(join(tmpdir(), 'cb-chrome-'));
+const args = [
+  '--headless=new', `--remote-debugging-port=${PORT}`, `--user-data-dir=${profile}`,
+  '--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', // поддельные камера и микрофон
+  '--autoplay-policy=no-user-gesture-required',
+  '--disable-features=WebRtcHideLocalIpsWithMdns', // обе вкладки на одной машине: обходимся без mDNS
+  '--no-first-run', '--no-default-browser-check', '--window-size=1280,800',
+  ...(process.platform === 'linux' ? ['--no-sandbox'] : []), 'about:blank',
+];
+const chrome = spawn(findChrome(), args, { stdio: 'ignore' });
+let wsUrl;
+for (let i = 0; i < 50 && !wsUrl; i++) {
+  try { wsUrl = (await (await fetch(`http://127.0.0.1:${PORT}/json/version`)).json()).webSocketDebuggerUrl; } catch (_) { await sleep(200); }
+}
+if (!wsUrl) { console.log('FAIL Chrome не запустился'); process.exit(1); }
+const cdp = new CDP(wsUrl);
+await cdp.ready;
+
+try {
+  const A = await openPage(cdp, 'ana', basic(...users.ana));
+  const Bp = await openPage(cdp, 'bob', basic(...users.bob));
+  check(await A.waitFor('typeof Talk !== "undefined" && Talk.peer') && await Bp.waitFor('typeof Talk !== "undefined" && Talk.peer'), 'обе вкладки подключились к потоку событий');
+
+  const room = await A.eval(`api('POST', '/api/talk/direct', { user_id: ${bobId} }).then(r => r.id)`);
+  await A.eval(`location.hash = '#/talk/${room}'`);
+  check(await A.waitFor(`Talk.view && Talk.view.id === '${room}' && !!document.querySelector('.talk-compose textarea')`), 'ana открыла переписку');
+
+  // сообщение через интерфейс: Enter в поле ввода
+  await A.eval(`(() => { const i = document.querySelector('.talk-compose textarea'); i.value = 'Привет из браузера <script>x</script>';
+    i.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); })()`);
+  check(await Bp.waitFor('Talk.unread >= 1 && !!document.querySelector(\'.talk-item .nav-count\')'), 'у bob появился счётчик непрочитанного');
+  await Bp.eval(`location.hash = '#/talk/${room}'`);
+  check(await Bp.waitFor(`[...document.querySelectorAll('.msg .txt')].some(e => e.textContent === 'Привет из браузера <script>x</script>')`),
+    'bob видит сообщение (HTML показан текстом)');
+  check(await Bp.waitFor('Talk.unread === 0'), 'после открытия переписки счётчик обнулился');
+  check(await Bp.eval('document.querySelectorAll(".msg script").length') === 0, 'в сообщении нет исполняемого HTML');
+
+  // звонок
+  await A.eval(`Call.join('${room}')`);
+  check(await A.waitFor(`Call.room === '${room}' && !!document.querySelector('.call')`), 'ana начала звонок, открылось окно звонка');
+  check(await Bp.waitFor(`!!document.querySelector('.ring .btn.primary')`), 'bob видит входящий звонок');
+  await Bp.eval(`document.querySelector('.ring .btn.primary').click()`);
+  const remoteVideo = `(() => { const t = [...Call.tiles].filter(([k]) => k !== 'me');
+    return t.length === 1 && t[0][1].video.videoWidth > 0 && t[0][1].video.srcObject.getAudioTracks().length === 1; })()`;
+  const connected = `[...Call.pcs.values()].length === 1 && [...Call.pcs.values()][0].pc.connectionState === 'connected'`;
+  check(await A.waitFor(connected, 20000) && await Bp.waitFor(connected, 20000), 'WebRTC-соединение установлено');
+  check(await A.waitFor(remoteVideo, 15000), 'ana получает видео и звук от bob');
+  check(await Bp.waitFor(remoteVideo, 15000), 'bob получает видео и звук от ana');
+
+  await A.eval('Call.toggleMic()');
+  check(await A.eval('Call.local.getAudioTracks().every(t => !t.enabled) && Call.btnMic.classList.contains("off")'), 'микрофон выключается');
+  await A.eval('Call.toggleMic()');
+
+  if (process.env.SHOT) {
+    await sleep(800);
+    const { data } = await A.send('Page.captureScreenshot', { format: 'png' });
+    writeFileSync(process.env.SHOT, Buffer.from(data, 'base64'));
+    console.log('снимок звонка:', process.env.SHOT);
+  }
+
+  await Bp.eval('Call.hangup()');
+  check(await A.waitFor(`Call.tiles.size === 1 && Call.pcs.size === 0`, 10000), 'bob положил трубку — у ana его плитка исчезла');
+  await A.eval('Call.hangup()');
+  check(await A.waitFor(`!document.querySelector('.call') && [...document.querySelectorAll('.talk-sys')].some(e => e.textContent.startsWith('Звонок завершён'))`, 10000),
+    'звонок завершён, в переписке есть запись о нём');
+
+  check(A.errors.length === 0 && Bp.errors.length === 0, 'без ошибок JavaScript' + (A.errors.length + Bp.errors.length ? ': ' + [...A.errors, ...Bp.errors].join(' | ') : ''));
+} catch (e) {
+  check(false, 'исключение: ' + e.message);
+} finally {
+  chrome.kill();
+  await sleep(500);
+  try { rmSync(profile, { recursive: true, force: true }); } catch (_) {}
+}
+console.log('\nИТОГО ошибок:', fails);
+process.exit(fails ? 1 : 0);

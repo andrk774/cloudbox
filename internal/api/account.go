@@ -254,7 +254,8 @@ func (s *Server) me(w http.ResponseWriter, r *http.Request) {
 			"video": media.HasFFmpeg(),
 			"pdf":   media.HasPdftoppm(),
 		},
-		"encryption": s.Cfg.EncryptionKey != "",
+		"encryption":  s.Cfg.EncryptionKey != "",
+		"talk_unread": s.Talk.Unread(r.Context(), u.ID),
 	})
 }
 

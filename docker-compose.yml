@@ -2,6 +2,7 @@
 # С HTTPS через Caddy:            docker compose --profile https up -d      (DOMAIN в .env)
 # С хранилищем Garage (S3):       docker compose --profile s3 up -d         (см. README, «S3 / Garage»)
 # С онлайн-офисом Collabora:      docker compose --profile https --profile office up -d   (OFFICE_DOMAIN в .env)
+# С TURN для видеозвонков:        docker compose --profile https --profile talk up -d     (CB_TURN_SECRET в .env)
 # Профили можно сочетать.
 
 services:
@@ -71,6 +72,39 @@ services:
       dictionaries: ru_RU en_US
       username: admin
       password: ${COLLABORA_ADMIN_PASSWORD:-change-me}
+
+  # coturn — ретрансляция медиапотока видеозвонков, когда участники за NAT.
+  # host-сеть: TURN нужен широкий диапазон UDP-портов, проброс через docker-proxy слишком медленный.
+  coturn:
+    profiles: ["talk"]
+    image: coturn/coturn:4.6
+    restart: unless-stopped
+    network_mode: host
+    command:
+      - -n
+      - --log-file=stdout
+      - --no-cli
+      - --fingerprint
+      - --use-auth-secret
+      - --static-auth-secret=${CB_TURN_SECRET:?задайте CB_TURN_SECRET в .env}
+      - --realm=${DOMAIN:-localhost}
+      - --listening-port=3478
+      - --min-port=49160
+      - --max-port=49200
+      # сервер за NAT (дома за роутером): раскомментируйте и укажите внешний IP
+      # - --external-ip=203.0.113.10
+      # не ретранслировать во внутренние сети: иначе TURN становится входом в локальную сеть сервера
+      - --no-multicast-peers
+      - --denied-peer-ip=0.0.0.0-0.255.255.255
+      - --denied-peer-ip=10.0.0.0-10.255.255.255
+      - --denied-peer-ip=100.64.0.0-100.127.255.255
+      - --denied-peer-ip=127.0.0.0-127.255.255.255
+      - --denied-peer-ip=169.254.0.0-169.254.255.255
+      - --denied-peer-ip=172.16.0.0-172.31.255.255
+      - --denied-peer-ip=192.168.0.0-192.168.255.255
+      - --denied-peer-ip=::1
+      - --denied-peer-ip=fc00::-fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+      - --denied-peer-ip=fe80::-febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff
 
 volumes:
   pgdata:
