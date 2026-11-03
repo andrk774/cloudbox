@@ -1,0 +1,20 @@
+{
+  "name": "CloudBox",
+  "short_name": "CloudBox",
+  "description": "Личное облачное хранилище",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f6f7f9",
+  "theme_color": "#2f6fed",
+  "lang": "ru",
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ],
+  "share_target": {
+    "action": "/share-target",
+    "method": "POST",
+    "enctype": "multipart/form-data",
+    "params": { "title": "title", "text": "text", "files": [{ "name": "files", "accept": ["image/*", "video/*", "audio/*", "application/pdf", "*/*"] }] }
+  }
+}

@@ -31,6 +31,16 @@ async function get(url, opt) {
   return d;
 }
 
+function thumb(n) {
+  const el = h('div', { class: 'ficon' + (n.is_dir ? ' dir' : '') }, icon(n));
+  if (!n.is_dir && /^(image\/(png|jpe?g|gif|webp|bmp)|video\/|application\/pdf)/.test(n.mime || '')) {
+    const img = h('img', { loading: 'lazy', alt: '', src: base + '/thumb?s=128&node=' + n.id });
+    img.onerror = () => img.replaceWith(icon(n));
+    el.replaceChildren(img);
+  }
+  return el;
+}
+
 const logo = () => h('div', { class: 'logo' }, h('div', { class: 'logo-mark' }, '☁'), 'CloudBox');
 
 async function start() {
@@ -62,7 +72,7 @@ function showFile(info) {
   const src = base + '/content?inline=1';
   let media = null;
   const m = n.mime || '';
-  if (/^image\/(png|jpe?g|gif|webp|bmp|avif)$/.test(m)) media = h('img', { src, alt: n.name });
+  if (/^image\/(png|jpe?g|gif|webp|bmp|avif)$/.test(m)) { media = h('img', { src: base + '/thumb?s=1024', alt: n.name }); media.onerror = () => { media.src = src; }; }
   else if (m.startsWith('video/')) media = h('video', { src, controls: true });
   else if (m.startsWith('audio/')) media = h('audio', { src, controls: true });
   root.replaceChildren(
@@ -105,7 +115,7 @@ async function showDir(info, dirId) {
 
   const rows = d.items.map(n => h('tr', null,
     h('td', null, h('div', { class: 'fname', onclick: () => n.is_dir ? showDir(info, n.id) : (location.href = base + '/content?node=' + n.id) },
-      h('div', { class: 'ficon' + (n.is_dir ? ' dir' : '') }, icon(n)), h('div', { class: 'nm' }, n.name))),
+      thumb(n), h('div', { class: 'nm' }, n.name))),
     h('td', { class: 'c-size' }, n.is_dir ? '—' : fmtSize(n.size)),
     h('td', { class: 'c-date' }, fmtDate(n.updated_at)),
     h('td', { class: 'c-act' }, h('a', { class: 'icon-btn', title: 'Скачать', href: n.is_dir ? base + '/zip?node=' + n.id : base + '/content?node=' + n.id }, '⬇'))));

@@ -2,14 +2,21 @@
 <html lang="ru">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#2f6fed">
 <title>CloudBox</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%232f6fed'/><path d='M10 21h12a4 4 0 0 0 0-8 6 6 0 0 0-11.5 1.5A3.5 3.5 0 0 0 10 21z' fill='white'/></svg>">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/icon.svg">
 <link rel="stylesheet" href="/app.css">
 </head>
 <body>
 <div id="root"></div>
 <div class="toasts" id="toasts"></div>
+<script src="/vendor/purify.min.js"></script>
+<script src="/vendor/qrcode.js"></script>
+<script src="/md.js"></script>
 <script src="/app.js"></script>
+<script src="/views.js"></script>
 </body>
 </html>

@@ -1,4 +1,14 @@
+github.com/emersion/go-ical v0.0.0-20240127095438-fc1c9d8fb2b6 h1:kHoSgklT8weIDl6R6xFpBJ5IioRdBU1v2X2aCZRVCcM=
+github.com/emersion/go-ical v0.0.0-20240127095438-fc1c9d8fb2b6/go.mod h1:BEksegNspIkjCQfmzWgsgbu6KdeJ/4LwUZs7DMBzjzw=
+github.com/emersion/go-vcard v0.0.0-20230815062825-8fda7d206ec9 h1:ATgqloALX6cHCranzkLb8/zjivwQ9DWWDCQRnxTPfaA=
+github.com/emersion/go-vcard v0.0.0-20230815062825-8fda7d206ec9/go.mod h1:HMJKR5wlh/ziNp+sHEDV2ltblO4JD2+IdDOWtGcQBTM=
+github.com/emersion/go-webdav v0.6.0 h1:rbnBUEXvUM2Zk65Him13LwJOBY0ISltgqM5k6T5Lq4w=
+github.com/emersion/go-webdav v0.6.0/go.mod h1:mI8iBx3RAODwX7PJJ7qzsKAKs/vY429YfS2/9wKnDbQ=
+github.com/golang/image v0.28.0 h1:0AtF9r4gRf5v3i0EDY1Bx7iLnChFK18LnYNfeLoDj/Y=
+github.com/golang/image v0.28.0/go.mod h1:GUJYXtnGKEUgggyzh+Vxt+AviiCcyiwpsl8iQ8MvwGY=
 github.com/golang/net v0.41.0 h1:Y4JovJflyckTFr7CKCuOIfATKK2eddbAsjpgkAn5edQ=
 github.com/golang/net v0.41.0/go.mod h1:B/K4NNqkfmg07DQYrbwvSluqCJOOXwUjeb/5lOisjbA=
 github.com/lib/pq v1.10.9 h1:YXG7RB+JIjhP29X+OtkiDnYaXQwpS4JEWq7dtCCRUEw=
 github.com/lib/pq v1.10.9/go.mod h1:AlVN5x4E4T544tWzH6hKfbfQvm3HdbOxrmggDNAPY9o=
+github.com/teambition/rrule-go v1.8.2 h1:lIjpjvWTj9fFUZCmuoVDrKVOtdiyzbzc93qTmRVe/J8=
+github.com/teambition/rrule-go v1.8.2/go.mod h1:Ieq5AbrKGciP1V//Wq8ktsTXwSwJHDD5mD/wLBGl3p4=

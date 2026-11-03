@@ -1,43 +1,46 @@
 # CloudBox
 
-Self-hosted облачное хранилище в духе **Nextcloud Files**: один бинарник на Go и PostgreSQL. Веб-интерфейс встроен в бинарник, файлы хранятся на диске или в S3 (Garage, SeaweedFS, Yandex Object Storage, Selectel).
+Self-hosted облачное хранилище в духе **Nextcloud**: один бинарник на Go + PostgreSQL. Веб-интерфейс встроен в бинарник, файлы лежат на диске или в S3 (Garage, SeaweedFS, Yandex Object Storage, Selectel), по желанию — в зашифрованном виде.
 
 ## Возможности
 
 **Файлы**
-- Папки любой вложенности, загрузка файлов и целых папок, drag & drop из проводника.
-- Перемещение перетаскиванием на папку или на «хлебные крошки».
-- Переименование, перемещение, копирование. Копия не дублирует данные на диске: блобы общие.
-- Скачивание папки ZIP-архивом.
-- Просмотр в браузере: изображения, видео, аудио, PDF и текст, листание стрелками.
-- Поиск по имени, раздел «Недавние».
+- Папки, загрузка файлов и целых папок, drag & drop, перемещение перетаскиванием, копирование без дублирования данных, ZIP-архив папки.
+- **Докачка больших файлов**: загрузка частями по 8 МБ, после обрыва связи — продолжение с места остановки (и в браузере, и в клиенте синхронизации).
+- **Миниатюры на сервере**: фото (с учётом поворота из EXIF), кадр видео (ffmpeg), первая страница PDF (poppler). Кэшируются, пересоздаются при новой версии.
+- Просмотр фото, видео, аудио, PDF, текста и Markdown; встроенный редактор текстовых файлов.
+- Версии файлов, корзина с восстановлением на прежнее место.
+- **Полнотекстовый поиск** по содержимому TXT/MD/код, PDF, DOCX, XLSX, PPTX, ODT/ODS/ODP — с русской морфологией и подсветкой найденного фрагмента.
+- **Избранное, теги** (личные, цветные) и **комментарии** к файлам.
 
-**Версии и корзина**
-- Каждая перезапись файла сохраняет предыдущую версию. Число хранимых версий задаётся в `CB_MAX_VERSIONS`.
-- Любую версию можно скачать или восстановить.
-- Корзина: восстановление на прежнее место или в корень, если папки уже нет. Окончательное удаление и автоочистка через `CB_TRASH_DAYS`.
+**Совместная работа**
+- **Общий доступ пользователям и группам** с правами «просмотр» или «изменение»; раздел «Доступно мне»; общие папки видны и в WebDAV.
+- Публичные ссылки: пароль, срок действия, загрузка гостями, QR-код, счётчик скачиваний.
+- **Онлайн-редактор документов** Collabora Online / OnlyOffice через WOPI (с блокировками: пока документ открыт, другие клиенты его не перезапишут).
+- **Уведомления**: с вами поделились, новый комментарий, гость загрузил файл, ссылка скоро истечёт, квота почти заполнена.
+- **Журнал действий**: кто, что и когда загрузил, переименовал, удалил, скачал по ссылке.
 
-**Публичные ссылки**
-- Ссылка на файл или папку с паролем и сроком действия.
-- Для папок можно разрешить гостям загрузку. Загрузка гостя никогда не перезаписывает файлы владельца.
-- Счётчик скачиваний.
+**Фото, заметки, календарь, контакты**
+- **Галерея** — лента всех фото и видео по дате съёмки (EXIF), с группировкой по месяцам.
+- **Заметки** в Markdown с автосохранением (обычные `.md`-файлы в папке «Заметки» — синхронизируются вместе со всем остальным).
+- **Календарь (CalDAV)** и **контакты (CardDAV)** — синхронизация с телефоном через DAVx⁵, iOS/macOS, Thunderbird; повторяющиеся события.
 
-**WebDAV** (`/dav/`)
-- Подключается как сетевой диск в Windows, macOS, Linux и Android, работает с rclone.
-- Удаление через WebDAV тоже идёт в корзину.
-
-**Пользователи**
-- Первый зарегистрированный пользователь становится администратором.
-- Администратор задаёт квоты, сбрасывает пароли, создаёт и удаляет пользователей.
-- Пароли приложений для WebDAV-клиентов, их можно отозвать.
+**Клиенты**
+- **WebDAV** (`/dav/`) — сетевой диск в Windows/macOS/Linux/Android, rclone; отдаёт квоту (`quota-available-bytes`), ETag папок меняется при изменениях внутри.
+- **cloudbox-sync** — консольный клиент двусторонней синхронизации папки для Windows, Linux, macOS (см. ниже).
+- **PWA** — устанавливается на телефон как приложение; в Android появляется в меню «Поделиться».
 
 **Безопасность**
-- Пароли хешируются PBKDF2-SHA256 (310 000 итераций).
-- Сессии хранятся в БД в виде хеша токена.
-- Защита от CSRF через проверку Origin.
-- Ограничение попыток входа.
-- Файлы отдаются с `CSP: sandbox`, поэтому загруженный HTML не выполнится.
-- Строгая изоляция пользователей.
+- **Двухфакторная аутентификация (TOTP)** + 10 одноразовых кодов восстановления.
+- **Вход через OIDC** (Authentik, Keycloak, Authelia, Zitadel) с PKCE и проверкой подписи токена.
+- Список сеансов с завершением чужих, **журнал входов**, пароли приложений для WebDAV/CalDAV/синхронизации.
+- **Шифрование файлов на сервере** AES-256-GCM (сегментами по 64 КБ — работает перемотка видео и Range-запросы).
+- PBKDF2-SHA256 для паролей, защита от CSRF, ограничение попыток входа, `CSP: sandbox` при отдаче файлов, строгая изоляция пользователей.
+
+**Эксплуатация**
+- **Бэкап и восстановление** одной командой (БД + файлы в один `.tar.gz`), ежедневный бэкап по расписанию с ротацией.
+- **Перенос хранилища** `local ↔ s3` одной командой.
+- **Метрики Prometheus** (`/metrics`), структурированные логи (`CB_LOG_FORMAT=json`).
 
 ## Быстрый старт
 
@@ -49,27 +52,27 @@ docker compose up -d
 
 Откройте `http://IP-сервера:8080` и зарегистрируйте первого пользователя — он станет администратором.
 
-### С HTTPS (нужен для WebDAV в Windows)
-
-Направьте домен на VPS. Затем пропишите в `.env`:
-
-```
-DOMAIN=cloud.example.ru
-CB_PUBLIC_URL=https://cloud.example.ru
-```
-
-И запустите:
+### С HTTPS (нужен для WebDAV в Windows и для установки PWA)
 
 ```bash
+# .env: DOMAIN=cloud.example.ru и CB_PUBLIC_URL=https://cloud.example.ru
 docker compose --profile https up -d
 ```
 
-Caddy сам получит сертификат Let's Encrypt. Если на сервере уже стоит nginx, возьмите `deploy/nginx.conf.example`. В нём важно отключить буферизацию и лимит тела запроса.
+Caddy сам получит сертификат Let's Encrypt. Для nginx — `deploy/nginx.conf.example`.
+
+### Онлайн-офис (Collabora)
+
+1. Направьте второй домен (например `office.example.ru`) на сервер.
+2. В `.env`: `OFFICE_DOMAIN=office.example.ru`, `CB_WOPI_URL=https://office.example.ru`, `COLLABORA_ADMIN_PASSWORD=...`.
+3. `docker compose --profile https --profile office up -d`
+
+DOCX/XLSX/PPTX/ODT открываются щелчком прямо в браузере. Подойдёт и OnlyOffice Docs с включённым WOPI — укажите его адрес в `CB_WOPI_URL`.
 
 ### S3 / Garage
 
-1. Сгенерируйте секрет (`openssl rand -hex 32`) и впишите его в `deploy/garage.toml` вместо `rpc_secret`.
-2. Поднимите Garage и настройте его:
+1. Сгенерируйте секрет (`openssl rand -hex 32`) и впишите в `deploy/garage.toml` вместо `rpc_secret`.
+2. Поднимите и настройте Garage:
 
 ```bash
 docker compose --profile s3 up -d garage
@@ -81,32 +84,70 @@ docker compose exec garage /garage key create cloudbox-key   # покажет Ke
 docker compose exec garage /garage bucket allow --read --write --owner cloudbox --key cloudbox-key
 ```
 
-3. В `.env` укажите `CB_STORAGE=s3`, `CB_S3_ACCESS_KEY` и `CB_S3_SECRET_KEY`, затем выполните `docker compose --profile s3 up -d`.
+3. В `.env`: `CB_STORAGE=s3`, `CB_S3_ACCESS_KEY`, `CB_S3_SECRET_KEY`; затем `docker compose --profile s3 up -d`.
 
-Для Yandex Object Storage задайте `CB_S3_ENDPOINT=https://storage.yandexcloud.net` и `CB_S3_REGION=ru-central1`.
+Для Yandex Object Storage: `CB_S3_ENDPOINT=https://storage.yandexcloud.net`, `CB_S3_REGION=ru-central1`.
 
-> Перенос данных между `local` и `s3` пока не автоматизирован. Выберите хранилище до начала работы.
+### Вход через OIDC
 
-## Подключение WebDAV
+У провайдера создайте клиента с Redirect URI `https://cloud.example.ru/api/auth/oidc/callback`, затем в `.env`:
 
-Адрес: `https://cloud.example.ru/dav/`. Логин — ваше имя пользователя, пароль — основной или пароль приложения из настроек.
+```
+CB_OIDC_ISSUER=https://auth.example.ru/application/o/cloudbox/
+CB_OIDC_CLIENT_ID=...
+CB_OIDC_CLIENT_SECRET=...
+CB_PASSWORD_LOGIN=false   # если нужен вход только через SSO (администраторы всё равно могут войти паролем)
+```
 
-| Клиент | Как подключить |
+### Шифрование файлов
+
+```
+CB_ENCRYPTION_KEY=<openssl rand -hex 32>
+```
+
+Новые файлы пишутся зашифрованными, старые читаются как есть. **Потеря ключа — потеря всех файлов**: храните ключ отдельно от бэкапов. Зашифровать уже имеющиеся файлы можно так: `backup` → новая пустая база → `restore` с заданным ключом.
+
+## Подключение устройств
+
+| Что | Как |
 |---|---|
-| Windows | Проводник → «Подключить сетевой диск» → адрес (только HTTPS) |
-| Linux | `davs://cloud.example.ru/dav/` в Nautilus или Dolphin; `davfs2` для монтирования |
-| macOS | Finder → ⌘K |
-| Android | Solid Explorer, Total Commander + WebDAV, FolderSync |
-| rclone | `rclone config` → `webdav` → `vendor: other` |
+| Сетевой диск (WebDAV) | `https://cloud.example.ru/dav/` — Windows: «Подключить сетевой диск»; Linux: `davs://…`; macOS: ⌘K; Android: Solid Explorer, FolderSync |
+| Календарь и контакты | Android: DAVx⁵ → «Вход с URL» → `https://cloud.example.ru`; iOS/macOS: учётная запись CalDAV/CardDAV; Thunderbird: календарь «В сети» |
+| Автозагрузка фото | FolderSync / PhotoSync → WebDAV → папка `DCIM/Camera` → «Фото/Камера», режим «Только загрузка» |
+| Отправка файлов с телефона | Установите CloudBox как приложение (меню браузера → «Установить») → в Android «Поделиться → CloudBox» |
+| Папка на компьютере | `cloudbox-sync` (ниже) |
 
-Для совместимости адрес `/remote.php/webdav/` перенаправляется на `/dav/`.
+Логин — имя пользователя, пароль — **пароль приложения** из «Настроек» (при включённой 2FA основной пароль в WebDAV/CalDAV не работает).
+
+Чужие общие папки в WebDAV видны в каталоге «Доступно мне».
+
+## Клиент синхронизации cloudbox-sync
+
+Готовые сборки для Windows, Linux и macOS появляются в Releases при публикации тега `v*`. Или соберите сами: `go build ./cmd/cloudbox-sync`.
+
+```bash
+export CLOUDBOX_PASSWORD=<пароль приложения>
+cloudbox-sync -server https://cloud.example.ru -user andrey -local ~/CloudBox -remote /Документы -watch 30s
+```
+
+- Изменения с одной стороны копируются на другую; большие файлы загружаются частями с докачкой.
+- Конфликт (правка с обеих сторон): серверная версия скачивается, локальная сохраняется как «имя (конфликт ПК дата)» и загружается следующим проходом — ничего не теряется.
+- Удалённое на сервере уходит локально в `.cloudbox-trash`, удалённое локально — в корзину сервера.
+- `-dry-run` показывает, что будет сделано, ничего не меняя.
 
 ## Команды
 
 ```bash
 docker compose exec app cloudbox useradd -admin -quota-mb 0 admin 'StrongPass123'
 docker compose exec app cloudbox passwd admin 'NewPass456'
+docker compose exec app cloudbox backup -o /backups/manual.tar.gz      # бэкап БД и файлов
+docker compose exec app cloudbox migrate-storage -to s3                # перенос файлов в S3
+docker compose exec app cloudbox reindex                               # переиндексировать поиск
+# восстановление — в новую ПУСТУЮ базу:
+docker compose run --rm app restore -i /backups/cloudbox-2026-11-03.tar.gz
 ```
+
+Ежедневный бэкап включается переменной `CB_BACKUP_DIR` (в compose — папка `./backups`): архив создаётся в `CB_BACKUP_HOUR`, хранятся последние `CB_BACKUP_KEEP`. Скопировать его вне сервера можно, например, `rclone sync ./backups remote:cloudbox-backups`.
 
 ## Настройки (переменные окружения)
 
@@ -114,62 +155,66 @@ docker compose exec app cloudbox passwd admin 'NewPass456'
 |---|---|---|
 | `CB_LISTEN` | `:8080` | адрес сервера |
 | `CB_DATABASE_URL` | — | строка подключения PostgreSQL |
-| `CB_PUBLIC_URL` | `http://localhost:8080` | внешний адрес для ссылок |
-| `CB_SECRET` | случайный | ключ подписи cookie публичных ссылок |
+| `CB_PUBLIC_URL` | `http://localhost:8080` | внешний адрес |
+| `CB_SECRET` | случайный | ключ подписи cookie и токенов |
+| `CB_TZ` | `Asia/Yekaterinburg` | часовой пояс для EXIF и календаря |
 | `CB_ALLOW_REGISTRATION` | `false` | открытая регистрация |
 | `CB_DEFAULT_QUOTA_MB` | `10240` | квота новых пользователей (0 — без ограничения) |
 | `CB_MAX_UPLOAD_MB` | `4096` | максимальный размер файла |
 | `CB_MAX_VERSIONS` | `10` | старых версий на файл |
 | `CB_TRASH_DAYS` | `30` | срок хранения в корзине |
 | `CB_STORAGE` | `local` | `local` или `s3` |
-| `CB_DATA_DIR` | `./data` | каталог блобов для `local` |
-| `CB_TMP_DIR` | системный | временные файлы загрузок |
+| `CB_DATA_DIR`, `CB_TMP_DIR` | `./data`, системный | каталоги блобов и временных файлов |
 | `CB_S3_*` | — | `ENDPOINT`, `REGION`, `BUCKET`, `ACCESS_KEY`, `SECRET_KEY`, `PATH_STYLE` |
+| `CB_ENCRYPTION_KEY` | — | 64 hex — шифрование файлов |
+| `CB_BACKUP_DIR`, `CB_BACKUP_HOUR`, `CB_BACKUP_KEEP` | —, `3`, `7` | ежедневный бэкап |
+| `CB_OIDC_ISSUER`, `CB_OIDC_CLIENT_ID`, `CB_OIDC_CLIENT_SECRET` | — | вход через OIDC |
+| `CB_OIDC_NAME`, `CB_OIDC_AUTO_CREATE`, `CB_OIDC_LINK_BY_USERNAME`, `CB_PASSWORD_LOGIN` | | поведение входа |
+| `CB_WOPI_URL`, `CB_WOPI_DISCOVERY_URL`, `CB_WOPI_HOST_URL` | — | онлайн-редактор |
+| `CB_LOG_FORMAT` | `text` | `text` или `json` |
+| `CB_METRICS_TOKEN` | — | Bearer-токен для `/metrics` (без него — только из локальной сети) |
 
 ## Устройство
 
 ```
-cmd/cloudbox        точка входа, фоновые задачи, CLI
-internal/config     переменные окружения
-internal/db         подключение и миграции (встроены в бинарник)
-internal/storage    блобы: local (диск) и S3 (свой клиент SigV4 без зависимостей)
-internal/files      ядро: дерево, версии, корзина, квоты, ссылки, сборка мусора
-internal/auth       пользователи, сессии, пароли приложений
-internal/secure     PBKDF2, токены, HMAC
-internal/api        REST API, публичные ссылки, раздача файлов
-internal/dav        WebDAV поверх ядра (golang.org/x/net/webdav)
-web/static          веб-интерфейс на чистом JS, встраивается через go:embed
+cmd/cloudbox         сервер, фоновые задачи, CLI (backup/restore/migrate-storage/reindex)
+cmd/cloudbox-sync    клиент двусторонней синхронизации
+internal/files       ядро: дерево, версии, корзина, квоты, права, шаринг, докачка, миниатюры,
+                     поиск, теги, комментарии, журнал, уведомления, блокировки WOPI
+internal/auth        пользователи, сессии, 2FA, пароли приложений, журнал входов, OIDC-пользователи
+internal/oidc        OpenID Connect: discovery, PKCE, проверка подписи по JWKS (без зависимостей)
+internal/dav         WebDAV поверх ядра + виртуальная папка «Доступно мне»
+internal/pim         CalDAV/CardDAV (go-webdav) с хранением в PostgreSQL
+internal/wopi        WOPI-хост для Collabora/OnlyOffice
+internal/media       EXIF, миниатюры (изображения, ffmpeg, pdftoppm)
+internal/textext     извлечение текста для поиска (PDF, DOCX, XLSX, PPTX, ODF, текст)
+internal/storage     local, S3 (свой клиент SigV4), шифрующая обёртка AES-256-GCM
+internal/backup      бэкап/восстановление, перенос между хранилищами, расписание
+internal/metrics     Prometheus
+web/static           веб-интерфейс на чистом JS (go:embed), PWA, service worker
 ```
 
-**Метаданные в PostgreSQL, байты в хранилище.** Таблица `nodes` хранит дерево: файлы и папки. Таблица `versions` хранит версии; каждая ссылается на блоб по ключу. Несколько версий могут ссылаться на один блоб, это используется при копировании и восстановлении версии.
-
-**Удаление блобов.** Блоб удаляется не сразу: ключ попадает в очередь `blob_gc`. Фоновая задача стирает объект, только когда на него не осталось ни одной ссылки.
-
-**Корзина.** При удалении всё поддерево помечается одной меткой времени. По ней восстанавливается ровно то, что было удалено вместе. Объекты, удалённые раньше по отдельности, остаются в корзине.
+- **Метаданные в PostgreSQL, байты в хранилище.** Версии ссылаются на блоб по ключу; несколько версий могут ссылаться на один блоб (копирование, восстановление версии). Блоб удаляется фоновой задачей только когда ссылок не осталось.
+- **ETag папок** поддерживается триггером: любое изменение внутри меняет ETag всех родителей и корня пользователя — клиент синхронизации за один запрос узнаёт, что ничего не поменялось.
+- **Права**: доступ к узлу определяется ближайшим расшаренным предком; все операции выполняются от имени владельца дерева, квота тоже его.
+- **Поиск**: фоновая очередь извлекает текст, PostgreSQL хранит `tsvector` (русская морфология + точные слова), GIN-индекс.
 
 ## REST API (кратко)
 
-Авторизация: cookie сессии или заголовок `Authorization: Bearer <token>`. Токен возвращает `/api/auth/login`.
+Авторизация: cookie сессии, `Authorization: Bearer <token>` (выдаёт `/api/auth/login`) или Basic с паролем приложения.
 
 ```
-POST   /api/auth/register | /api/auth/login | /api/auth/logout
-GET    /api/me                                  профиль и квота
-GET    /api/files?parent=ID                     содержимое папки + хлебные крошки
-POST   /api/files/folder        {parent,name}
-POST   /api/files/upload?parent=&name=&path=&conflict=rename   тело — байты файла
-GET    /api/files/{id}/content[?version=&inline=1]             поддерживает Range
-GET    /api/files/{id}/zip
-PATCH  /api/files/{id}          {name?, parent?}                переименование и перенос
-POST   /api/files/{id}/copy     {parent, name?}
-DELETE /api/files/{id}                                          в корзину
-GET    /api/files/{id}/versions   POST /api/files/{id}/versions/{vid}/restore
-GET    /api/search?q=   GET /api/recent
-GET    /api/trash   POST /api/trash/{id}/restore   DELETE /api/trash/{id}   DELETE /api/trash
-GET    /api/shares   POST /api/shares {node_id,password,expires_at,allow_upload}   DELETE /api/shares/{id}
-GET/POST/PATCH/DELETE /api/admin/users...
+POST   /api/auth/login → {token} | {totp_required, ticket};  POST /api/auth/totp {ticket, code}
+GET    /api/files?parent=ID          PATCH/DELETE /api/files/{id}      POST /api/files/{id}/copy
+POST   /api/files/upload?parent=&name=&path=&conflict=rename            тело — байты файла
+POST   /api/uploads {parent,name,size} → PUT /api/uploads/{id}?offset=N → POST /api/uploads/{id}/complete
+GET    /api/files/{id}/content[?version=]   PUT /api/files/{id}/content (If-Match: version)
+GET    /api/files/{id}/thumb?s=128|256|512|1024        GET /api/files/{id}/zip
+GET    /api/search?q=   /api/recent   /api/favorites   /api/gallery   /api/shared-with-me   /api/sync/tree
+POST   /api/user-shares {node_id, user_id|group_id, can_write}       POST /api/shares (публичная ссылка)
+GET    /api/files/{id}/comments|versions|access    PUT /api/files/{id}/tags|favorite
+GET    /api/activity   /api/notifications   /api/events?from=&to=   /api/contacts
 ```
-
-Загрузка из консоли:
 
 ```bash
 curl -H "Authorization: Bearer $TOKEN" --data-binary @video.mp4 \
@@ -178,7 +223,14 @@ curl -H "Authorization: Bearer $TOKEN" --data-binary @video.mp4 \
 
 ## Тесты
 
-`scripts/e2e.py` — сквозной тест на 62 проверки: API, версии, корзина, квоты, ссылки, CSRF, изоляция пользователей, WebDAV. Тест пройден на обоих бэкендах: локальном диске и S3 (SeaweedFS).
+```bash
+go test ./...                                    # unit: шифрование, TOTP (RFC 6238), OIDC, EXIF, извлечение текста
+CB_URL=… python3 scripts/e2e.py                  # 62 проверки: файлы, версии, корзина, квоты, ссылки, WebDAV
+CB_URL=… FIXTURES=… python3 scripts/e2e2.py      # 98 проверок: шаринг, докачка, миниатюры, поиск, 2FA, CalDAV/CardDAV, WOPI…
+CB_URL=… CB_USER=… CB_PASS=… sh scripts/sync-test.sh   # 14 проверок клиента синхронизации
+```
+
+Всё это запускается в GitHub Actions (`.github/workflows/ci.yml`). Бэкап → восстановление в новую базу на зашифрованный S3 → побайтовое сравнение всех файлов также проверены вручную.
 
 ## Сборка без Docker
 
@@ -187,15 +239,12 @@ go build -o cloudbox ./cmd/cloudbox
 CB_DATABASE_URL=postgres://... CB_SECRET=... ./cloudbox
 ```
 
-В `go.mod` модули `golang.org/x/*` заменены на официальные зеркала на GitHub (`github.com/golang/*`). Это нужно для сборки там, где закрыт `proxy.golang.org`. Если сеть открыта, `replace` можно удалить.
+Для миниатюр видео и PDF, поиска по PDF и бэкапов нужны `ffmpeg`, `poppler-utils`, `postgresql-client` (в Docker-образе уже есть).
 
-## Что дальше (по аналогии с Nextcloud)
+В `go.mod` модули `golang.org/x/*` заменены на официальные зеркала на GitHub (`github.com/golang/*`) — для сборки там, где закрыт `proxy.golang.org`. Если сеть открыта, `replace` можно удалить.
 
-- [ ] Миниатюры на сервере (сейчас превью — это сам файл)
-- [ ] Докачка больших файлов чанками (tus или протокол Nextcloud chunking v2)
-- [ ] Общие папки между пользователями (не только публичные ссылки)
-- [ ] Календарь и контакты: CalDAV/CardDAV
-- [ ] Онлайн-редактирование документов через Collabora или OnlyOffice (WOPI)
-- [ ] 2FA (TOTP), журнал входов
-- [ ] Шифрование на стороне сервера, перенос local ↔ s3
-- [ ] Десктопный клиент синхронизации
+## Чего пока нет
+
+- Нативных мобильных приложений (вместо них — PWA + WebDAV-клиенты для автозагрузки) и графического клиента синхронизации (есть консольный).
+- Чата и видеозвонков (Talk), почты.
+- Сквозного шифрования на стороне клиента (шифрование — на сервере).

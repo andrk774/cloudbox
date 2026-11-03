@@ -33,6 +33,9 @@ type User struct {
 	QuotaBytes int64     `json:"quota_bytes"`
 	CreatedAt  time.Time `json:"created_at"`
 	UsedBytes  int64     `json:"used_bytes,omitempty"`
+	TOTP       bool      `json:"totp_enabled"`
+	Email      string    `json:"email"`
+	OIDC       bool      `json:"oidc"`
 }
 
 type AppPassword struct {
@@ -44,7 +47,8 @@ type AppPassword struct {
 
 type Service struct {
 	DB           *sql.DB
-	DefaultQuota int64 // байт
+	DefaultQuota int64  // байт
+	Secret       string // для подписи билетов второго шага входа
 
 	mu        sync.Mutex
 	basicHits map[string]basicEntry // кэш проверок Basic-auth для WebDAV (PBKDF2 дорогой)
@@ -55,11 +59,11 @@ type basicEntry struct {
 	exp time.Time
 }
 
-const userCols = `id, username, is_admin, quota_bytes, created_at`
+const userCols = `id, username, is_admin, quota_bytes, created_at, totp_enabled, email, oidc_sub IS NOT NULL`
 
 func scanUser(s interface{ Scan(...any) error }) (*User, error) {
 	var u User
-	if err := s.Scan(&u.ID, &u.Username, &u.IsAdmin, &u.QuotaBytes, &u.CreatedAt); err != nil {
+	if err := s.Scan(&u.ID, &u.Username, &u.IsAdmin, &u.QuotaBytes, &u.CreatedAt, &u.TOTP, &u.Email, &u.OIDC); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -121,8 +125,8 @@ func (s *Service) GetUser(ctx context.Context, uid int64) (*User, error) {
 }
 
 func (s *Service) ListUsers(ctx context.Context) ([]User, error) {
-	rows, err := s.DB.QueryContext(ctx, `SELECT u.id, u.username, u.is_admin, u.quota_bytes, u.created_at,
-		COALESCE((SELECT SUM(size) FROM versions v WHERE v.owner_id=u.id),0) FROM users u ORDER BY u.id`)
+	rows, err := s.DB.QueryContext(ctx, `SELECT u.id, u.username, u.is_admin, u.quota_bytes, u.created_at, u.totp_enabled, u.email,
+		u.oidc_sub IS NOT NULL, COALESCE((SELECT SUM(size) FROM versions v WHERE v.owner_id=u.id),0) FROM users u ORDER BY u.id`)
 	if err != nil {
 		return nil, err
 	}
@@ -130,7 +134,7 @@ func (s *Service) ListUsers(ctx context.Context) ([]User, error) {
 	out := []User{}
 	for rows.Next() {
 		var u User
-		if err := rows.Scan(&u.ID, &u.Username, &u.IsAdmin, &u.QuotaBytes, &u.CreatedAt, &u.UsedBytes); err != nil {
+		if err := rows.Scan(&u.ID, &u.Username, &u.IsAdmin, &u.QuotaBytes, &u.CreatedAt, &u.TOTP, &u.Email, &u.OIDC, &u.UsedBytes); err != nil {
 			return nil, err
 		}
 		out = append(out, u)
@@ -188,13 +192,13 @@ func (s *Service) DeleteUser(ctx context.Context, uid int64) error {
 
 // ---------- сессии ----------
 
-func (s *Service) CreateSession(ctx context.Context, uid int64, ua string) (string, error) {
+func (s *Service) CreateSession(ctx context.Context, uid int64, ua, ip, method string) (string, error) {
 	tok := secure.Token(32)
 	if len(ua) > 200 {
 		ua = ua[:200]
 	}
-	_, err := s.DB.ExecContext(ctx, `INSERT INTO sessions (token_hash, user_id, user_agent, expires_at) VALUES ($1,$2,$3,$4)`,
-		secure.SHA256Hex(tok), uid, ua, time.Now().Add(SessionTTL))
+	_, err := s.DB.ExecContext(ctx, `INSERT INTO sessions (token_hash, user_id, user_agent, expires_at, ip, method) VALUES ($1,$2,$3,$4,$5,$6)`,
+		secure.SHA256Hex(tok), uid, ua, time.Now().Add(SessionTTL), ip, method)
 	return tok, err
 }
 
@@ -203,7 +207,8 @@ func (s *Service) UserBySession(ctx context.Context, tok string) (*User, error) 
 		return nil, ErrNotFound
 	}
 	h := secure.SHA256Hex(tok)
-	u, err := scanUser(s.DB.QueryRowContext(ctx, `SELECT u.id, u.username, u.is_admin, u.quota_bytes, u.created_at
+	u, err := scanUser(s.DB.QueryRowContext(ctx, `SELECT u.id, u.username, u.is_admin, u.quota_bytes, u.created_at, u.totp_enabled,
+		u.email, u.oidc_sub IS NOT NULL
 		FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=$1 AND s.expires_at > now()`, h))
 	if err != nil {
 		return nil, err
@@ -211,6 +216,7 @@ func (s *Service) UserBySession(ctx context.Context, tok string) (*User, error) 
 	// Скользящее продление: не чаще раза в сутки на сессию
 	s.DB.ExecContext(ctx, `UPDATE sessions SET expires_at=$1 WHERE token_hash=$2 AND expires_at < $3`,
 		time.Now().Add(SessionTTL), h, time.Now().Add(SessionTTL-24*time.Hour))
+	s.DB.ExecContext(ctx, `UPDATE sessions SET last_seen=now() WHERE token_hash=$1 AND last_seen < now() - interval '5 minutes'`, h)
 	return u, nil
 }
 
@@ -292,6 +298,10 @@ func (s *Service) CheckBasic(ctx context.Context, username, password string) (*U
 	}
 
 	u, err := s.Authenticate(ctx, username, password)
+	if err == nil && u.TOTP {
+		// При включённой 2FA основной пароль в WebDAV/API не работает — только пароли приложений.
+		u, err = nil, ErrBadCredentials
+	}
 	if errors.Is(err, ErrBadCredentials) {
 		u, err = s.checkAppPassword(ctx, username, password)
 	}

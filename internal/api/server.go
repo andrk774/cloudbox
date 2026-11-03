@@ -1,12 +1,13 @@
-// Package api — HTTP-сервер: REST API, публичные ссылки, WebDAV и встроенный веб-интерфейс.
+// Package api — HTTP-сервер: REST API, публичные ссылки, WebDAV/CalDAV/CardDAV, WOPI и веб-интерфейс.
 package api
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"io/fs"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -17,101 +18,206 @@ import (
 	"github.com/andrk774/cloudbox/internal/auth"
 	"github.com/andrk774/cloudbox/internal/config"
 	"github.com/andrk774/cloudbox/internal/files"
+	"github.com/andrk774/cloudbox/internal/metrics"
+	"github.com/andrk774/cloudbox/internal/oidc"
+	"github.com/andrk774/cloudbox/internal/pim"
+	"github.com/andrk774/cloudbox/internal/wopi"
 )
 
 const sessionCookie = "cb_session"
 
 type Server struct {
-	Cfg   config.Config
-	Auth  *auth.Service
-	Files *files.Service
-	DAV   http.Handler
-	Web   fs.FS
+	Cfg    config.Config
+	DB     *sql.DB
+	Auth   *auth.Service
+	Files  *files.Service
+	PIM    *pim.Service
+	DAV    http.Handler // /dav
+	PIMDAV http.Handler // /caldav, /carddav
+	WOPI   *wopi.Server
+	OIDC   *oidc.Provider
+	Web    fs.FS
 
 	limMu sync.Mutex
 	lim   map[string]*bucket
 }
 
 type ctxKey struct{}
+type ctxTok struct{}
 
 func userFrom(r *http.Request) *auth.User {
 	u, _ := r.Context().Value(ctxKey{}).(*auth.User)
 	return u
 }
 
+func tokenFrom(r *http.Request) string {
+	t, _ := r.Context().Value(ctxTok{}).(string)
+	return t
+}
+
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	h := mux.HandleFunc
 
 	// --- авторизация
-	mux.HandleFunc("GET /api/auth/status", s.authStatus)
-	mux.HandleFunc("POST /api/auth/register", s.register)
-	mux.HandleFunc("POST /api/auth/login", s.login)
-	mux.HandleFunc("POST /api/auth/logout", s.logout)
+	h("GET /api/auth/status", s.authStatus)
+	h("POST /api/auth/register", s.register)
+	h("POST /api/auth/login", s.login)
+	h("POST /api/auth/totp", s.loginTOTP)
+	h("POST /api/auth/logout", s.logout)
+	h("GET /api/auth/oidc/start", s.oidcStart)
+	h("GET /api/auth/oidc/callback", s.oidcCallback)
 
-	// --- профиль
-	mux.HandleFunc("GET /api/me", s.need(s.me))
-	mux.HandleFunc("POST /api/me/password", s.need(s.changePassword))
-	mux.HandleFunc("GET /api/me/app-passwords", s.need(s.listAppPasswords))
-	mux.HandleFunc("POST /api/me/app-passwords", s.need(s.createAppPassword))
-	mux.HandleFunc("DELETE /api/me/app-passwords/{id}", s.need(s.deleteAppPassword))
+	// --- профиль и безопасность
+	h("GET /api/me", s.need(s.me))
+	h("POST /api/me/password", s.need(s.changePassword))
+	h("GET /api/me/app-passwords", s.need(s.listAppPasswords))
+	h("POST /api/me/app-passwords", s.need(s.createAppPassword))
+	h("DELETE /api/me/app-passwords/{id}", s.need(s.deleteAppPassword))
+	h("GET /api/me/sessions", s.need(s.listSessions))
+	h("DELETE /api/me/sessions/{id}", s.need(s.deleteSession))
+	h("DELETE /api/me/sessions", s.need(s.deleteOtherSessions))
+	h("GET /api/me/logins", s.need(s.listLogins))
+	h("POST /api/me/totp/setup", s.need(s.totpSetup))
+	h("POST /api/me/totp/enable", s.need(s.totpEnable))
+	h("POST /api/me/totp/disable", s.need(s.totpDisable))
 
 	// --- файлы
-	mux.HandleFunc("GET /api/files", s.need(s.listFiles))
-	mux.HandleFunc("GET /api/files/{id}", s.need(s.getFile))
-	mux.HandleFunc("POST /api/files/folder", s.need(s.mkdir))
-	mux.HandleFunc("POST /api/files/upload", s.need(s.upload))
-	mux.HandleFunc("GET /api/files/{id}/content", s.need(s.content))
-	mux.HandleFunc("GET /api/files/{id}/zip", s.need(s.zip))
-	mux.HandleFunc("PATCH /api/files/{id}", s.need(s.moveFile))
-	mux.HandleFunc("POST /api/files/{id}/copy", s.need(s.copyFile))
-	mux.HandleFunc("DELETE /api/files/{id}", s.need(s.trashFile))
-	mux.HandleFunc("GET /api/files/{id}/versions", s.need(s.versions))
-	mux.HandleFunc("POST /api/files/{id}/versions/{vid}/restore", s.need(s.restoreVersion))
-	mux.HandleFunc("GET /api/search", s.need(s.search))
-	mux.HandleFunc("GET /api/recent", s.need(s.recent))
+	h("GET /api/files", s.need(s.listFiles))
+	h("GET /api/files/{id}", s.need(s.getFile))
+	h("POST /api/files/folder", s.need(s.mkdir))
+	h("POST /api/files/upload", s.need(s.upload))
+	h("GET /api/files/{id}/content", s.need(s.content))
+	h("PUT /api/files/{id}/content", s.need(s.saveContent))
+	h("GET /api/files/{id}/thumb", s.need(s.thumb))
+	h("GET /api/files/{id}/zip", s.need(s.zip))
+	h("PATCH /api/files/{id}", s.need(s.moveFile))
+	h("POST /api/files/{id}/copy", s.need(s.copyFile))
+	h("DELETE /api/files/{id}", s.need(s.trashFile))
+	h("GET /api/files/{id}/versions", s.need(s.versions))
+	h("POST /api/files/{id}/versions/{vid}/restore", s.need(s.restoreVersion))
+	h("GET /api/files/{id}/access", s.need(s.fileAccess))
+	h("PUT /api/files/{id}/favorite", s.need(s.setFavorite(true)))
+	h("DELETE /api/files/{id}/favorite", s.need(s.setFavorite(false)))
+	h("PUT /api/files/{id}/tags", s.need(s.setNodeTags))
+	h("GET /api/files/{id}/comments", s.need(s.listComments))
+	h("POST /api/files/{id}/comments", s.need(s.addComment))
+	h("DELETE /api/comments/{cid}", s.need(s.deleteComment))
+	h("GET /api/search", s.need(s.search))
+	h("GET /api/recent", s.need(s.recent))
+	h("GET /api/favorites", s.need(s.favorites))
+	h("GET /api/gallery", s.need(s.gallery))
+	h("GET /api/notes", s.need(s.notes))
+	h("GET /api/sync/tree", s.need(s.syncTree))
+
+	// --- докачка
+	h("POST /api/uploads", s.need(s.createUpload))
+	h("GET /api/uploads/{id}", s.need(s.getUpload))
+	h("PUT /api/uploads/{id}", s.need(s.appendUpload))
+	h("POST /api/uploads/{id}/complete", s.need(s.completeUpload))
+	h("DELETE /api/uploads/{id}", s.need(s.deleteUpload))
+
+	// --- теги
+	h("GET /api/tags", s.need(s.listTags))
+	h("POST /api/tags", s.need(s.createTag))
+	h("DELETE /api/tags/{id}", s.need(s.deleteTag))
+	h("GET /api/tags/{id}/files", s.need(s.taggedFiles))
 
 	// --- корзина
-	mux.HandleFunc("GET /api/trash", s.need(s.listTrash))
-	mux.HandleFunc("POST /api/trash/{id}/restore", s.need(s.restoreTrash))
-	mux.HandleFunc("DELETE /api/trash/{id}", s.need(s.purge))
-	mux.HandleFunc("DELETE /api/trash", s.need(s.emptyTrash))
+	h("GET /api/trash", s.need(s.listTrash))
+	h("POST /api/trash/{id}/restore", s.need(s.restoreTrash))
+	h("DELETE /api/trash/{id}", s.need(s.purge))
+	h("DELETE /api/trash", s.need(s.emptyTrash))
 
-	// --- публичные ссылки (управление)
-	mux.HandleFunc("GET /api/shares", s.need(s.listShares))
-	mux.HandleFunc("POST /api/shares", s.need(s.createShare))
-	mux.HandleFunc("DELETE /api/shares/{id}", s.need(s.deleteShare))
+	// --- публичные ссылки и общий доступ
+	h("GET /api/shares", s.need(s.listShares))
+	h("POST /api/shares", s.need(s.createShare))
+	h("DELETE /api/shares/{id}", s.need(s.deleteShare))
+	h("POST /api/user-shares", s.need(s.createUserShare))
+	h("PATCH /api/user-shares/{id}", s.need(s.updateUserShare))
+	h("DELETE /api/user-shares/{id}", s.need(s.deleteUserShare))
+	h("GET /api/shared-with-me", s.need(s.sharedWithMe))
+	h("GET /api/directory", s.need(s.directory))
+
+	// --- журнал и уведомления
+	h("GET /api/activity", s.need(s.activity))
+	h("GET /api/notifications", s.need(s.listNotifications))
+	h("POST /api/notifications/read", s.need(s.readNotifications))
+	h("DELETE /api/notifications", s.need(s.clearNotifications))
+
+	// --- календари и контакты
+	h("GET /api/pim", s.need(s.pimInfo))
+	h("GET /api/calendars", s.need(s.listCalendars))
+	h("POST /api/calendars", s.need(s.createCalendar))
+	h("DELETE /api/calendars/{id}", s.need(s.deleteCollection))
+	h("GET /api/events", s.need(s.listEvents))
+	h("POST /api/events", s.need(s.createEvent))
+	h("DELETE /api/events/{id}", s.need(s.deleteObject))
+	h("GET /api/contacts", s.need(s.listContacts))
+	h("POST /api/contacts", s.need(s.createContact))
+	h("DELETE /api/contacts/{id}", s.need(s.deleteObject))
 
 	// --- администрирование
-	mux.HandleFunc("GET /api/admin/users", s.admin(s.adminListUsers))
-	mux.HandleFunc("POST /api/admin/users", s.admin(s.adminCreateUser))
-	mux.HandleFunc("PATCH /api/admin/users/{id}", s.admin(s.adminUpdateUser))
-	mux.HandleFunc("DELETE /api/admin/users/{id}", s.admin(s.adminDeleteUser))
+	h("GET /api/admin/users", s.admin(s.adminListUsers))
+	h("POST /api/admin/users", s.admin(s.adminCreateUser))
+	h("PATCH /api/admin/users/{id}", s.admin(s.adminUpdateUser))
+	h("DELETE /api/admin/users/{id}", s.admin(s.adminDeleteUser))
+	h("GET /api/admin/groups", s.admin(s.adminListGroups))
+	h("POST /api/admin/groups", s.admin(s.adminCreateGroup))
+	h("DELETE /api/admin/groups/{id}", s.admin(s.adminDeleteGroup))
+	h("PUT /api/admin/groups/{id}/members", s.admin(s.adminSetMembers))
 
 	// --- публичный доступ по ссылке
-	mux.HandleFunc("GET /api/public/{token}", s.pubInfo)
-	mux.HandleFunc("POST /api/public/{token}/auth", s.pubAuth)
-	mux.HandleFunc("GET /api/public/{token}/list", s.pubList)
-	mux.HandleFunc("GET /api/public/{token}/content", s.pubContent)
-	mux.HandleFunc("GET /api/public/{token}/zip", s.pubZip)
-	mux.HandleFunc("POST /api/public/{token}/upload", s.pubUpload)
-	mux.HandleFunc("GET /s/{token}", s.sharePage)
+	h("GET /api/public/{token}", s.pubInfo)
+	h("POST /api/public/{token}/auth", s.pubAuth)
+	h("GET /api/public/{token}/list", s.pubList)
+	h("GET /api/public/{token}/content", s.pubContent)
+	h("GET /api/public/{token}/thumb", s.pubThumb)
+	h("GET /api/public/{token}/zip", s.pubZip)
+	h("POST /api/public/{token}/upload", s.pubUpload)
+	h("GET /s/{token}", s.sharePage)
 
-	// --- веб-интерфейс
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) })
+	// --- онлайн-редактор
+	h("GET /office/{id}", s.officePage)
+
+	// --- служебное
+	h("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) })
+	mux.Handle("GET /metrics", s.metricsGuard(metrics.Handler(s.DB, s.Cfg.MetricsToken)))
 	mux.Handle("GET /", s.static())
 
-	// WebDAV использует свои методы (PROPFIND, MKCOL, …), поэтому направляем его в обход mux.
+	// WebDAV/CalDAV/CardDAV/WOPI используют свои методы (PROPFIND, REPORT, …) — направляем их в обход mux.
 	root := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p := r.URL.Path
 		switch {
-		case s.DAV != nil && (r.URL.Path == "/dav" || strings.HasPrefix(r.URL.Path, "/dav/")):
+		case s.DAV != nil && (p == "/dav" || strings.HasPrefix(p, "/dav/")):
 			s.DAV.ServeHTTP(w, r)
-		case r.URL.Path == "/.well-known/webdav" || r.URL.Path == "/remote.php/webdav" || strings.HasPrefix(r.URL.Path, "/remote.php/webdav/"):
+		case s.PIMDAV != nil && (strings.HasPrefix(p, "/caldav") || strings.HasPrefix(p, "/carddav") ||
+			p == "/.well-known/caldav" || p == "/.well-known/carddav"):
+			s.PIMDAV.ServeHTTP(w, r)
+		case s.WOPI.Enabled() && strings.HasPrefix(p, "/wopi/files/"):
+			s.WOPI.ServeHTTP(w, r)
+		case p == "/.well-known/webdav" || p == "/remote.php/webdav" || strings.HasPrefix(p, "/remote.php/webdav/"):
 			http.Redirect(w, r, "/dav/", http.StatusMovedPermanently)
 		default:
 			mux.ServeHTTP(w, r)
 		}
 	})
 	return s.middleware(root)
+}
+
+func (s *Server) metricsGuard(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.Cfg.MetricsToken == "" {
+			// без токена — только из локальной/docker-сети (Prometheus рядом)
+			host, _, _ := net.SplitHostPort(r.RemoteAddr)
+			ip := net.ParseIP(host)
+			if ip == nil || !(ip.IsLoopback() || ip.IsPrivate()) || r.Header.Get("X-Forwarded-For") != "" {
+				http.NotFound(w, r)
+				return
+			}
+		}
+		h.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) static() http.Handler {
@@ -125,8 +231,16 @@ func (s *Server) static() http.Handler {
 				r.URL.Path = "/"
 			}
 		}
-		if r.URL.Path == "/" {
+		switch {
+		case r.URL.Path == "/" || strings.HasSuffix(r.URL.Path, ".js") || strings.HasSuffix(r.URL.Path, ".css") ||
+			strings.HasSuffix(r.URL.Path, ".webmanifest"):
 			w.Header().Set("Cache-Control", "no-cache")
+		}
+		if strings.HasSuffix(r.URL.Path, ".webmanifest") {
+			w.Header().Set("Content-Type", "application/manifest+json")
+		}
+		if r.URL.Path == "/sw.js" {
+			w.Header().Set("Service-Worker-Allowed", "/")
 		}
 		fsrv.ServeHTTP(w, r)
 	})
@@ -147,14 +261,36 @@ func (s *Server) sharePage(w http.ResponseWriter, r *http.Request) {
 
 type statusWriter struct {
 	http.ResponseWriter
-	code int
+	code  int
+	bytes int64
 }
 
 func (w *statusWriter) WriteHeader(c int) { w.code = c; w.ResponseWriter.WriteHeader(c) }
+func (w *statusWriter) Write(b []byte) (int, error) {
+	n, err := w.ResponseWriter.Write(b)
+	w.bytes += int64(n)
+	return n, err
+}
 func (w *statusWriter) Flush() {
 	if f, ok := w.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
 	}
+}
+
+func routeOf(p string) string {
+	switch {
+	case strings.HasPrefix(p, "/api/public/"), strings.HasPrefix(p, "/s/"):
+		return "public"
+	case strings.HasPrefix(p, "/api/"):
+		return "api"
+	case strings.HasPrefix(p, "/dav"):
+		return "webdav"
+	case strings.HasPrefix(p, "/caldav"), strings.HasPrefix(p, "/carddav"), strings.HasPrefix(p, "/.well-known/ca"):
+		return "pim"
+	case strings.HasPrefix(p, "/wopi/"), strings.HasPrefix(p, "/office/"):
+		return "office"
+	}
+	return "static"
 }
 
 func (s *Server) middleware(next http.Handler) http.Handler {
@@ -163,7 +299,8 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 		h := w.Header()
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("Referrer-Policy", "same-origin")
-		if !strings.HasPrefix(r.URL.Path, "/dav/") {
+		route := routeOf(r.URL.Path)
+		if route == "api" || route == "public" || route == "static" {
 			h.Set("X-Frame-Options", "SAMEORIGIN")
 		}
 
@@ -175,15 +312,27 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 			}
 		}
 
-		if !strings.HasPrefix(r.URL.Path, "/dav/") {
-			if u := s.sessionUser(r); u != nil {
-				r = r.WithContext(context.WithValue(r.Context(), ctxKey{}, u))
+		if route == "api" || route == "static" || route == "office" {
+			if u, tok := s.sessionUser(r); u != nil {
+				ctx := context.WithValue(r.Context(), ctxKey{}, u)
+				ctx = context.WithValue(ctx, ctxTok{}, tok)
+				r = r.WithContext(ctx)
 			}
 		}
 		sw := &statusWriter{ResponseWriter: w, code: 200}
 		next.ServeHTTP(sw, r)
-		if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/dav/") || sw.code >= 400 {
-			log.Printf("%s %s %d %s", r.Method, r.URL.Path, sw.code, time.Since(start).Round(time.Millisecond))
+		d := time.Since(start)
+		metrics.Observe(route, r.Method, sw.code, d)
+		if route != "static" || sw.code >= 400 {
+			attrs := []any{"method", r.Method, "path", r.URL.Path, "status", sw.code, "ms", d.Milliseconds(), "ip", clientIP(r)}
+			if u := userFrom(r); u != nil {
+				attrs = append(attrs, "user", u.Username)
+			}
+			if sw.code >= 500 && sw.code != http.StatusInsufficientStorage {
+				slog.Error("http", attrs...)
+			} else {
+				slog.Info("http", attrs...)
+			}
 		}
 	})
 }
@@ -202,22 +351,30 @@ func (s *Server) sameOrigin(r *http.Request, origin string) bool {
 	return false
 }
 
-func (s *Server) sessionUser(r *http.Request) *auth.User {
+// sessionUser: cookie сессии, Bearer-токен или Basic (пароль приложения — для клиента синхронизации).
+func (s *Server) sessionUser(r *http.Request) (*auth.User, string) {
 	tok := ""
 	if c, err := r.Cookie(sessionCookie); err == nil {
 		tok = c.Value
 	}
-	if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
-		tok = strings.TrimPrefix(h, "Bearer ")
+	hdr := r.Header.Get("Authorization")
+	if strings.HasPrefix(hdr, "Bearer ") {
+		tok = strings.TrimPrefix(hdr, "Bearer ")
 	}
-	if tok == "" {
-		return nil
+	if tok != "" {
+		if u, err := s.Auth.UserBySession(r.Context(), tok); err == nil {
+			return u, tok
+		}
+		return nil, ""
 	}
-	u, err := s.Auth.UserBySession(r.Context(), tok)
-	if err != nil {
-		return nil
+	if strings.HasPrefix(hdr, "Basic ") && strings.HasPrefix(r.URL.Path, "/api/") {
+		if user, pass, ok := r.BasicAuth(); ok && s.allow(r, "basic", 60, time.Minute) {
+			if u, err := s.Auth.CheckBasic(r.Context(), user, pass); err == nil {
+				return u, ""
+			}
+		}
 	}
-	return u
+	return nil, ""
 }
 
 func (s *Server) need(h http.HandlerFunc) http.HandlerFunc {
@@ -240,7 +397,49 @@ func (s *Server) admin(h http.HandlerFunc) http.HandlerFunc {
 	})
 }
 
-// ---------- ограничение частоты (вход, пароли ссылок) ----------
+// ---------- права на узлы ----------
+
+// acc проверяет доступ текущего пользователя к узлу. Ответ уже отправлен, если ok == false.
+func (s *Server) acc(w http.ResponseWriter, r *http.Request, id string, needWrite bool) (*files.Perm, *files.Node, bool) {
+	perm, n, err := s.Files.Access(r.Context(), userFrom(r).ID, id)
+	if err != nil {
+		fail(w, err)
+		return nil, nil, false
+	}
+	if needWrite && !perm.Write {
+		fail(w, files.ErrForbidden)
+		return nil, nil, false
+	}
+	return perm, n, true
+}
+
+// parentAcc — папка, в которой что-то создают ("" или "root" — свой корень). Нужны права на запись.
+func (s *Server) parentAcc(w http.ResponseWriter, r *http.Request, id string) (*files.Perm, *string, bool) {
+	if id == "" || id == "root" {
+		return files.OwnPerm(userFrom(r).ID), nil, true
+	}
+	perm, n, ok := s.acc(w, r, id, true)
+	if !ok {
+		return nil, nil, false
+	}
+	if !n.IsDir {
+		fail(w, files.ErrNotDir)
+		return nil, nil, false
+	}
+	return perm, &n.ID, true
+}
+
+func (s *Server) logAct(r *http.Request, owner int64, action string, n *files.Node, details string) {
+	u := userFrom(r)
+	if u == nil {
+		s.Files.Log(r.Context(), owner, nil, "гость", action, n, details, clientIP(r))
+		return
+	}
+	id := u.ID
+	s.Files.Log(r.Context(), owner, &id, u.Username, action, n, details, clientIP(r))
+}
+
+// ---------- ограничение частоты ----------
 
 type bucket struct {
 	n     int
@@ -310,24 +509,57 @@ func writeErr(w http.ResponseWriter, code int, msg string) {
 	writeJSON(w, code, map[string]string{"error": msg})
 }
 
+func okJSON(w http.ResponseWriter) { writeJSON(w, 200, map[string]bool{"ok": true}) }
+
 // fail переводит доменные ошибки в HTTP-коды.
 func fail(w http.ResponseWriter, err error) {
 	switch {
-	case errors.Is(err, files.ErrNotFound), errors.Is(err, auth.ErrNotFound):
+	case errors.Is(err, files.ErrNotFound), errors.Is(err, auth.ErrNotFound), errors.Is(err, pim.ErrNotFound):
 		writeErr(w, http.StatusNotFound, err.Error())
-	case errors.Is(err, files.ErrExists), errors.Is(err, auth.ErrUserExists):
+	case errors.Is(err, files.ErrExists), errors.Is(err, auth.ErrUserExists), errors.Is(err, files.ErrShared), errors.Is(err, files.ErrTagExists):
 		writeErr(w, http.StatusConflict, err.Error())
+	case errors.Is(err, files.ErrConflict):
+		writeErr(w, http.StatusPreconditionFailed, err.Error())
+	case errors.Is(err, files.ErrLocked):
+		writeErr(w, http.StatusLocked, err.Error())
 	case errors.Is(err, files.ErrQuota):
 		writeErr(w, http.StatusInsufficientStorage, err.Error())
 	case errors.Is(err, files.ErrTooLarge):
 		writeErr(w, http.StatusRequestEntityTooLarge, err.Error())
+	case errors.Is(err, files.ErrForbidden):
+		writeErr(w, http.StatusForbidden, err.Error())
+	case errors.Is(err, files.ErrOffset):
+		writeErr(w, http.StatusConflict, err.Error())
 	case errors.Is(err, files.ErrNotDir), errors.Is(err, files.ErrIsDir), errors.Is(err, files.ErrInvalidName),
-		errors.Is(err, files.ErrCycle), errors.Is(err, auth.ErrBadUsername), errors.Is(err, auth.ErrWeakPassword):
+		errors.Is(err, files.ErrCycle), errors.Is(err, files.ErrCrossOwner),
+		errors.Is(err, auth.ErrBadUsername), errors.Is(err, auth.ErrWeakPassword), errors.Is(err, auth.ErrBadCode):
 		writeErr(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, auth.ErrBadCredentials):
 		writeErr(w, http.StatusUnauthorized, err.Error())
+	case errors.Is(err, files.ErrNoThumb):
+		writeErr(w, http.StatusNotFound, err.Error())
 	default:
-		log.Println("internal error:", err)
+		var ve interface{ Error() string } = err
+		msg := ve.Error()
+		// ошибки валидации из сервисов (на русском) отдаём как 400, остальное — 500
+		if isUserMessage(msg) {
+			writeErr(w, http.StatusBadRequest, msg)
+			return
+		}
+		slog.Error("internal error", "err", err)
 		writeErr(w, http.StatusInternalServerError, "внутренняя ошибка сервера")
 	}
+}
+
+// isUserMessage — сообщение на кириллице без технических деталей.
+func isUserMessage(m string) bool {
+	if m == "" || strings.Contains(m, "pq:") || strings.Contains(m, "sql") {
+		return false
+	}
+	for _, r := range m {
+		if r >= 'а' && r <= 'я' || r >= 'А' && r <= 'Я' {
+			return true
+		}
+	}
+	return false
 }
