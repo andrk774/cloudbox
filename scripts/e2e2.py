@@ -330,13 +330,13 @@ check(st == 400, "код, которым включали 2FA, повторно 
 code2 = totp(setup["secret"], time.time() + 30)
 st, l2 = y.j("POST", "/api/auth/totp", {"ticket": l1["ticket"], "code": code2})
 check(st == 200 and y.j("GET", "/api/me")[0] == 200, "вход по коду TOTP")
-yr = Client()
-t = yr.j("POST", "/api/auth/login", {"username": "petya", "password": "petya12345"})[1]["ticket"]
-st, _ = yr.j("POST", "/api/auth/totp", {"ticket": t, "code": code2})
-check(st == 400, "тот же код TOTP второй раз не принимается")
 rc = en["recovery_codes"][0]
+# Отдельный вход не заводим: лимит — 10 входов за 5 минут с IP, а все шаги CI идут с 127.0.0.1.
+# Неудачная попытка не сжигает тикет, поэтому повтор кода проверяем на тикете для кода восстановления.
 y2 = Client()
 t = y2.j("POST", "/api/auth/login", {"username": "petya", "password": "petya12345"})[1]["ticket"]
+st, _ = y2.j("POST", "/api/auth/totp", {"ticket": t, "code": code2})
+check(st == 400, "тот же код TOTP второй раз не принимается")
 st, _ = y2.j("POST", "/api/auth/totp", {"ticket": t, "code": rc})
 check(st == 200, "вход по коду восстановления")
 y3 = Client()
