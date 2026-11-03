@@ -14,8 +14,10 @@ import (
 	"os"
 	"path"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/andrk774/cloudbox/internal/media"
 	"github.com/andrk774/cloudbox/internal/storage"
 	"github.com/lib/pq"
 )
@@ -25,7 +27,11 @@ type Service struct {
 	St          storage.Storage
 	TmpDir      string
 	MaxVersions int
-	MaxUpload   int64 // байт
+	MaxUpload   int64          // байт
+	Loc         *time.Location // часовой пояс для дат EXIF без смещения
+
+	kickOnce sync.Once
+	kick     chan struct{}
 }
 
 type querier interface {
@@ -134,8 +140,7 @@ func (s *Service) Ancestors(ctx context.Context, uid int64, id string) ([]Node, 
 		WITH RECURSIVE a AS (
 			SELECT `+nodeCols+`, 0 AS depth FROM nodes WHERE id=$1 AND owner_id=$2
 			UNION ALL
-			SELECT n.id, n.owner_id, n.parent_id, n.name, n.is_dir, n.size, n.mime, n.current_version_id,
-			       n.created_at, n.updated_at, n.deleted_at, a.depth+1
+			SELECT `+nodeColsP("n")+`, a.depth+1
 			FROM nodes n JOIN a ON n.id = a.parent_id
 		) SELECT `+nodeCols+` FROM a ORDER BY depth DESC`, id, uid)
 	if err != nil {
@@ -159,20 +164,6 @@ func (s *Service) PathOf(ctx context.Context, uid int64, id string) (string, err
 		parts[i] = n.Name
 	}
 	return "/" + strings.Join(parts, "/"), nil
-}
-
-func (s *Service) Search(ctx context.Context, uid int64, q string) ([]Node, error) {
-	q = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(strings.TrimSpace(q))
-	if q == "" {
-		return []Node{}, nil
-	}
-	rows, err := s.DB.QueryContext(ctx, `SELECT `+nodeCols+` FROM nodes
-		WHERE owner_id=$1 AND deleted_at IS NULL AND name ILIKE '%' || $2 || '%'
-		ORDER BY is_dir DESC, updated_at DESC LIMIT 200`, uid, q)
-	if err != nil {
-		return nil, err
-	}
-	return collect(rows)
 }
 
 func (s *Service) Recent(ctx context.Context, uid int64, limit int) ([]Node, error) {
@@ -262,10 +253,12 @@ func (s *Service) EnsureDirs(ctx context.Context, uid int64, parent *string, rel
 }
 
 type spooled struct {
-	f    *os.File
-	size int64
-	sum  string
-	mime string
+	f     *os.File
+	own   bool // временный файл создан нами — удалить после записи
+	size  int64
+	sum   string
+	mime  string
+	taken *time.Time
 }
 
 func (s *Service) spool(r io.Reader, name string) (*spooled, error) {
@@ -287,6 +280,26 @@ func (s *Service) spool(r io.Reader, name string) (*spooled, error) {
 		os.Remove(f.Name())
 		return nil, err
 	}
+	return s.finishSpool(f, n, hex.EncodeToString(h.Sum(nil)), name, true), nil
+}
+
+// spoolFile — содержимое уже лежит во временном файле (WebDAV, докачка): считаем только хеш, без второй копии.
+func (s *Service) spoolFile(f *os.File, name string) (*spooled, error) {
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return nil, err
+	}
+	h := sha256.New()
+	n, err := io.Copy(h, f)
+	if err != nil {
+		return nil, err
+	}
+	if s.MaxUpload > 0 && n > s.MaxUpload {
+		return nil, ErrTooLarge
+	}
+	return s.finishSpool(f, n, hex.EncodeToString(h.Sum(nil)), name, false), nil
+}
+
+func (s *Service) finishSpool(f *os.File, n int64, sum, name string, own bool) *spooled {
 	m := mime.TypeByExtension(strings.ToLower(path.Ext(name)))
 	if m == "" {
 		buf := make([]byte, 512)
@@ -296,15 +309,38 @@ func (s *Service) spool(r io.Reader, name string) (*spooled, error) {
 	if i := strings.Index(m, ";"); i > 0 && !strings.HasPrefix(m, "text/") {
 		m = m[:i]
 	}
-	return &spooled{f: f, size: n, sum: hex.EncodeToString(h.Sum(nil)), mime: m}, nil
+	sp := &spooled{f: f, own: own, size: n, sum: sum, mime: m}
+	if m == "image/jpeg" {
+		if _, err := f.Seek(0, io.SeekStart); err == nil {
+			if ex, err := media.ReadExif(f, s.Loc); err == nil {
+				sp.taken = ex.Taken
+			}
+		}
+	}
+	return sp
 }
 
-func (sp *spooled) close() { sp.f.Close(); os.Remove(sp.f.Name()) }
+func (sp *spooled) close() {
+	if sp.own {
+		sp.f.Close()
+		os.Remove(sp.f.Name())
+	}
+}
 
 func newBlobKey() string { return strings.ReplaceAll(NewID(), "-", "") }
 
+// WriteOpts — условия перезаписи.
+type WriteOpts struct {
+	IfVersion string // перезаписать, только если текущая версия совпадает (редактор, защита от потери правок)
+	LockID    string // блокировка WOPI, которой владеет пишущий
+}
+
 // Write создаёт файл или добавляет новую версию существующего.
 func (s *Service) Write(ctx context.Context, uid int64, parent *string, name string, r io.Reader) (*Node, error) {
+	return s.WriteOpt(ctx, uid, parent, name, r, WriteOpts{})
+}
+
+func (s *Service) WriteOpt(ctx context.Context, uid int64, parent *string, name string, r io.Reader, o WriteOpts) (*Node, error) {
 	if err := ValidateName(name); err != nil {
 		return nil, err
 	}
@@ -316,6 +352,25 @@ func (s *Service) Write(ctx context.Context, uid int64, parent *string, name str
 		return nil, err
 	}
 	defer sp.close()
+	return s.writeSpooled(ctx, uid, parent, name, sp, o)
+}
+
+// WriteFile записывает уже готовый временный файл (файл не удаляется — это забота вызывающего).
+func (s *Service) WriteFile(ctx context.Context, uid int64, parent *string, name string, f *os.File) (*Node, error) {
+	if err := ValidateName(name); err != nil {
+		return nil, err
+	}
+	if err := s.checkDir(ctx, s.DB, uid, parent); err != nil {
+		return nil, err
+	}
+	sp, err := s.spoolFile(f, name)
+	if err != nil {
+		return nil, err
+	}
+	return s.writeSpooled(ctx, uid, parent, name, sp, WriteOpts{})
+}
+
+func (s *Service) writeSpooled(ctx context.Context, uid int64, parent *string, name string, sp *spooled, o WriteOpts) (*Node, error) {
 	if err := s.checkQuota(ctx, uid, sp.size); err != nil {
 		return nil, err
 	}
@@ -327,8 +382,9 @@ func (s *Service) Write(ctx context.Context, uid int64, parent *string, name str
 		return nil, fmt.Errorf("storage: %w", err)
 	}
 	var node *Node
+	var err error
 	for attempt := 0; attempt < 3; attempt++ {
-		node, err = s.commitWrite(ctx, uid, parent, name, key, sp)
+		node, err = s.commitWrite(ctx, uid, parent, name, key, sp, o)
 		if !errors.Is(err, ErrExists) { // ErrExists = гонка с параллельной загрузкой, пробуем как перезапись
 			break
 		}
@@ -337,10 +393,11 @@ func (s *Service) Write(ctx context.Context, uid int64, parent *string, name str
 		s.queueGC(context.Background(), s.DB, key)
 		return nil, err
 	}
+	s.kickIndexer()
 	return node, nil
 }
 
-func (s *Service) commitWrite(ctx context.Context, uid int64, parent *string, name, key string, sp *spooled) (*Node, error) {
+func (s *Service) commitWrite(ctx context.Context, uid int64, parent *string, name, key string, sp *spooled, o WriteOpts) (*Node, error) {
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
@@ -357,15 +414,25 @@ func (s *Service) commitWrite(ctx context.Context, uid int64, parent *string, na
 		if existing.IsDir {
 			return nil, ErrIsDir
 		}
+		if o.IfVersion != "" && (existing.VersionID == nil || *existing.VersionID != o.IfVersion) {
+			return nil, ErrConflict
+		}
+		if err := s.checkLock(ctx, tx, existing.ID, o.LockID); err != nil {
+			return nil, err
+		}
 		nodeID = existing.ID
-		if _, err := tx.ExecContext(ctx, `UPDATE nodes SET current_version_id=$1, size=$2, mime=$3, updated_at=now() WHERE id=$4`,
-			vid, sp.size, sp.mime, nodeID); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE nodes SET current_version_id=$1, size=$2, mime=$3, updated_at=now(),
+			taken_at=$5, media_checked=TRUE WHERE id=$4`,
+			vid, sp.size, sp.mime, nodeID, sp.taken); err != nil {
 			return nil, err
 		}
 	case errors.Is(err, ErrNotFound):
+		if o.IfVersion != "" {
+			return nil, ErrConflict
+		}
 		nodeID = NewID()
-		if _, err := tx.ExecContext(ctx, `INSERT INTO nodes (id, owner_id, parent_id, name, is_dir, size, mime, current_version_id)
-			VALUES ($1,$2,$3,$4,FALSE,$5,$6,$7)`, nodeID, uid, parent, name, sp.size, sp.mime, vid); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO nodes (id, owner_id, parent_id, name, is_dir, size, mime, current_version_id, taken_at, media_checked)
+			VALUES ($1,$2,$3,$4,FALSE,$5,$6,$7,$8,TRUE)`, nodeID, uid, parent, name, sp.size, sp.mime, vid, sp.taken); err != nil {
 			if isUniqueViolation(err) {
 				return nil, ErrExists
 			}
@@ -379,6 +446,9 @@ func (s *Service) commitWrite(ctx context.Context, uid int64, parent *string, na
 		return nil, err
 	}
 	if err := s.pruneVersions(ctx, tx, nodeID); err != nil {
+		return nil, err
+	}
+	if err := s.queueIndex(ctx, tx, nodeID, name, sp.mime); err != nil {
 		return nil, err
 	}
 	n, err := s.get(ctx, tx, uid, nodeID)
@@ -496,15 +566,20 @@ func (s *Service) subtreeSize(ctx context.Context, q querier, id string) (int64,
 
 // Copy копирует файл или папку целиком. Блобы не дублируются: новые версии ссылаются на те же ключи.
 func (s *Service) Copy(ctx context.Context, uid int64, id string, newParent *string, newName string) (*Node, error) {
+	return s.CopyTo(ctx, uid, id, uid, newParent, newName)
+}
+
+// CopyTo копирует узел владельца srcOwner в дерево dstOwner (используется для общих папок).
+func (s *Service) CopyTo(ctx context.Context, srcOwner int64, id string, dstOwner int64, newParent *string, newName string) (*Node, error) {
 	if err := ValidateName(newName); err != nil {
 		return nil, err
 	}
-	src, err := s.Get(ctx, uid, id)
+	src, err := s.Get(ctx, srcOwner, id)
 	if err != nil {
 		return nil, err
 	}
-	if src.IsDir && newParent != nil {
-		if inside, err := s.IsInside(ctx, uid, src.ID, *newParent); err != nil {
+	if src.IsDir && newParent != nil && srcOwner == dstOwner {
+		if inside, err := s.IsInside(ctx, srcOwner, src.ID, *newParent); err != nil {
 			return nil, err
 		} else if inside {
 			return nil, ErrCycle
@@ -514,7 +589,7 @@ func (s *Service) Copy(ctx context.Context, uid int64, id string, newParent *str
 	if err != nil {
 		return nil, err
 	}
-	if err := s.checkQuota(ctx, uid, size); err != nil {
+	if err := s.checkQuota(ctx, dstOwner, size); err != nil {
 		return nil, err
 	}
 	tx, err := s.DB.BeginTx(ctx, nil)
@@ -522,29 +597,29 @@ func (s *Service) Copy(ctx context.Context, uid int64, id string, newParent *str
 		return nil, err
 	}
 	defer tx.Rollback()
-	if err := s.checkDir(ctx, tx, uid, newParent); err != nil {
+	if err := s.checkDir(ctx, tx, dstOwner, newParent); err != nil {
 		return nil, err
 	}
-	newID, err := s.copyRec(ctx, tx, uid, src, newParent, newName)
+	newID, err := s.copyRec(ctx, tx, dstOwner, src, newParent, newName)
 	if err != nil {
 		return nil, err
 	}
-	n, err := s.get(ctx, tx, uid, newID)
+	n, err := s.get(ctx, tx, dstOwner, newID)
 	if err != nil {
 		return nil, err
 	}
 	return n, tx.Commit()
 }
 
-func (s *Service) copyRec(ctx context.Context, tx *sql.Tx, uid int64, src *Node, parent *string, name string) (string, error) {
+func (s *Service) copyRec(ctx context.Context, tx *sql.Tx, owner int64, src *Node, parent *string, name string) (string, error) {
 	id := NewID()
 	var vid *string
 	if !src.IsDir && src.VersionID != nil {
 		v := NewID()
 		vid = &v
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO nodes (id, owner_id, parent_id, name, is_dir, size, mime, current_version_id)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`, id, uid, parent, name, src.IsDir, src.Size, src.Mime, vid); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO nodes (id, owner_id, parent_id, name, is_dir, size, mime, current_version_id, taken_at, media_checked)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,TRUE)`, id, owner, parent, name, src.IsDir, src.Size, src.Mime, vid, src.TakenAt); err != nil {
 		if isUniqueViolation(err) {
 			return "", ErrExists
 		}
@@ -552,7 +627,12 @@ func (s *Service) copyRec(ctx context.Context, tx *sql.Tx, uid int64, src *Node,
 	}
 	if vid != nil {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO versions (id, node_id, owner_id, blob_key, size, sha256)
-			SELECT $1, $2, owner_id, blob_key, size, sha256 FROM versions WHERE id=$3`, *vid, id, *src.VersionID); err != nil {
+			SELECT $1, $2, $3, blob_key, size, sha256 FROM versions WHERE id=$4`, *vid, id, owner, *src.VersionID); err != nil {
+			return "", err
+		}
+		// текст для поиска копируем, а не извлекаем заново
+		if _, err := tx.ExecContext(ctx, `INSERT INTO node_text (node_id, version_id, content, tsv)
+			SELECT $1, $2, content, tsv FROM node_text WHERE node_id=$3`, id, *vid, src.ID); err != nil {
 			return "", err
 		}
 	}
@@ -566,7 +646,7 @@ func (s *Service) copyRec(ctx context.Context, tx *sql.Tx, uid int64, src *Node,
 			return "", err
 		}
 		for i := range children {
-			if _, err := s.copyRec(ctx, tx, uid, &children[i], &id, children[i].Name); err != nil {
+			if _, err := s.copyRec(ctx, tx, owner, &children[i], &id, children[i].Name); err != nil {
 				return "", err
 			}
 		}
@@ -612,8 +692,8 @@ func (s *Service) ListTrash(ctx context.Context, uid int64) ([]Node, error) {
 	for rows.Next() {
 		var n Node
 		var parent, ver, tp sql.NullString
-		var del sql.NullTime
-		if err := rows.Scan(&n.ID, &n.OwnerID, &parent, &n.Name, &n.IsDir, &n.Size, &n.Mime, &ver, &n.CreatedAt, &n.UpdatedAt, &del, &tp); err != nil {
+		var del, taken sql.NullTime
+		if err := rows.Scan(&n.ID, &n.OwnerID, &parent, &n.Name, &n.IsDir, &n.Size, &n.Mime, &ver, &n.CreatedAt, &n.UpdatedAt, &del, &n.Etag, &taken, &tp); err != nil {
 			return nil, err
 		}
 		if del.Valid {
@@ -864,6 +944,9 @@ func (s *Service) RestoreVersion(ctx context.Context, uid int64, id, vid string)
 	if err := s.pruneVersions(ctx, tx, n.ID); err != nil {
 		return nil, err
 	}
+	if err := s.queueIndex(ctx, tx, n.ID, n.Name, n.Mime); err != nil {
+		return nil, err
+	}
 	res, err := s.get(ctx, tx, uid, n.ID)
 	if err != nil {
 		return nil, err
@@ -904,7 +987,7 @@ func (s *Service) GC(ctx context.Context) {
 		failed := false
 		for _, k := range keys {
 			var used bool
-			if err := s.DB.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM versions WHERE blob_key=$1)`, k).Scan(&used); err != nil {
+			if err := s.DB.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM versions WHERE blob_key=$1) OR EXISTS(SELECT 1 FROM thumbs WHERE blob_key=$1)`, k).Scan(&used); err != nil {
 				log.Println("gc:", err)
 				return
 			}

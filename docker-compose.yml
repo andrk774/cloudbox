@@ -1,6 +1,8 @@
-# Базовый запуск:          docker compose up -d
-# С HTTPS через Caddy:     docker compose --profile https up -d   (задайте DOMAIN в .env)
-# С хранилищем Garage (S3): docker compose --profile s3 up -d      (см. README, раздел «S3 / Garage»)
+# Базовый запуск:                 docker compose up -d
+# С HTTPS через Caddy:            docker compose --profile https up -d      (DOMAIN в .env)
+# С хранилищем Garage (S3):       docker compose --profile s3 up -d         (см. README, «S3 / Garage»)
+# С онлайн-офисом Collabora:      docker compose --profile https --profile office up -d   (OFFICE_DOMAIN в .env)
+# Профили можно сочетать.
 
 services:
   db:
@@ -29,6 +31,7 @@ services:
       CB_DATABASE_URL: postgres://cloudbox:${DB_PASSWORD:-cloudbox}@db:5432/cloudbox?sslmode=disable
     volumes:
       - appdata:/data
+      - ./backups:/backups
     ports:
       - "${APP_PORT:-8080}:8080"
 
@@ -42,6 +45,7 @@ services:
       - "443:443"
     environment:
       DOMAIN: ${DOMAIN:-localhost}
+      OFFICE_DOMAIN: ${OFFICE_DOMAIN:-office.localhost}
     volumes:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddydata:/data
@@ -54,6 +58,19 @@ services:
       - ./deploy/garage.toml:/etc/garage.toml:ro
       - garagemeta:/var/lib/garage/meta
       - garagedata:/var/lib/garage/data
+
+  # Collabora Online (CODE) — редактирование DOCX/XLSX/PPTX/ODT прямо в браузере.
+  collabora:
+    profiles: ["office"]
+    image: collabora/code:latest
+    restart: unless-stopped
+    cap_add: [MKNOD]
+    environment:
+      aliasgroup1: https://${DOMAIN:-localhost}:443
+      extra_params: --o:ssl.enable=false --o:ssl.termination=true --o:net.frame_ancestors=${DOMAIN:-localhost}
+      dictionaries: ru_RU en_US
+      username: admin
+      password: ${COLLABORA_ADMIN_PASSWORD:-change-me}
 
 volumes:
   pgdata:

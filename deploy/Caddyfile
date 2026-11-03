@@ -5,3 +5,10 @@
 		flush_interval -1
 	}
 }
+
+# Онлайн-офис (профиль office). Если не используется — блок можно удалить.
+{$OFFICE_DOMAIN} {
+	reverse_proxy collabora:9980 {
+		flush_interval -1
+	}
+}

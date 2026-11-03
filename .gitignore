@@ -2,3 +2,6 @@
 /data/
 /cloudbox
 *.exe
+/cloudbox-sync
+/dist/
+/backups/

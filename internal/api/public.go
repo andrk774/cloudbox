@@ -155,10 +155,23 @@ func (s *Server) pubContent(w http.ResponseWriter, r *http.Request) {
 		fail(w, err)
 		return
 	}
-	if r.Header.Get("Range") == "" && r.Method == http.MethodGet {
+	if r.Header.Get("Range") == "" && r.Method == http.MethodGet && r.URL.Query().Get("inline") != "1" {
 		s.Files.CountDownload(r.Context(), sh.ID)
+		s.logAct(r, sh.OwnerID, "public_download", n, "по ссылке")
 	}
 	serveBlob(w, r, b, n, r.URL.Query().Get("inline") == "1")
+}
+
+func (s *Server) pubThumb(w http.ResponseWriter, r *http.Request) {
+	sh := s.loadShare(w, r, true)
+	if sh == nil {
+		return
+	}
+	n := s.shareNode(w, r, sh, r.URL.Query().Get("node"))
+	if n == nil {
+		return
+	}
+	s.serveThumb(w, r, n)
 }
 
 func (s *Server) pubZip(w http.ResponseWriter, r *http.Request) {
@@ -171,6 +184,7 @@ func (s *Server) pubZip(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.Files.CountDownload(r.Context(), sh.ID)
+	s.logAct(r, sh.OwnerID, "public_download", n, "ZIP по ссылке")
 	s.writeZip(w, r, sh.OwnerID, n)
 }
 
@@ -196,5 +210,10 @@ func (s *Server) pubUpload(w http.ResponseWriter, r *http.Request) {
 	q.Set("conflict", "rename")
 	q.Del("path")
 	r.URL.RawQuery = q.Encode()
-	s.doUpload(w, r, sh.OwnerID, &dir.ID)
+	if n := s.doUpload(w, r, sh.OwnerID, &dir.ID); n != nil {
+		s.logAct(r, sh.OwnerID, "public_upload", n, "гость по ссылке")
+		s.Files.Notify(r.Context(), sh.OwnerID, "guest_upload", "Гость загрузил файл",
+			"«"+n.Name+"» в папку «"+dir.Name+"» по публичной ссылке.", "#/files/"+dir.ID, "")
+		s.Files.CheckQuotaWarning(r.Context(), sh.OwnerID)
+	}
 }
