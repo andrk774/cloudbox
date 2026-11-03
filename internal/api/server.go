@@ -21,10 +21,17 @@ import (
 	"github.com/andrk774/cloudbox/internal/netx"
 	"github.com/andrk774/cloudbox/internal/oidc"
 	"github.com/andrk774/cloudbox/internal/pim"
+	"github.com/andrk774/cloudbox/internal/talk"
 	"github.com/andrk774/cloudbox/internal/wopi"
 )
 
 const sessionCookie = "cb_session"
+
+// Перебор паролей через Basic-auth в API: не больше 20 неудач за 10 минут с одного адреса.
+const (
+	basicMaxFails   = 20
+	basicFailWindow = 10 * time.Minute
+)
 
 type Server struct {
 	Cfg    config.Config
@@ -37,6 +44,8 @@ type Server struct {
 	WOPI   *wopi.Server
 	OIDC   *oidc.Provider
 	Web    fs.FS
+	Talk   *talk.Service
+	ICE    talk.ICEConfig
 
 	lim netx.Limiter
 }
@@ -155,6 +164,23 @@ func (s *Server) Handler() http.Handler {
 	h("GET /api/contacts", s.need(s.listContacts))
 	h("POST /api/contacts", s.need(s.createContact))
 	h("DELETE /api/contacts/{id}", s.need(s.deleteObject))
+
+	// --- чат и звонки
+	h("GET /api/talk/events", s.need(s.talkEvents))
+	h("GET /api/talk/config", s.need(s.talkConfig))
+	h("GET /api/talk/rooms", s.need(s.talkRooms))
+	h("POST /api/talk/rooms", s.need(s.talkCreateRoom))
+	h("POST /api/talk/direct", s.need(s.talkDirect))
+	h("GET /api/talk/rooms/{id}", s.need(s.talkRoom))
+	h("PATCH /api/talk/rooms/{id}", s.need(s.talkRename))
+	h("POST /api/talk/rooms/{id}/members", s.need(s.talkAddMembers))
+	h("DELETE /api/talk/rooms/{id}/members/{uid}", s.need(s.talkRemoveMember))
+	h("GET /api/talk/rooms/{id}/messages", s.need(s.talkMessages))
+	h("POST /api/talk/rooms/{id}/messages", s.need(s.talkPost))
+	h("POST /api/talk/rooms/{id}/read", s.need(s.talkRead))
+	h("POST /api/talk/rooms/{id}/call/join", s.need(s.talkJoin))
+	h("POST /api/talk/rooms/{id}/call/leave", s.need(s.talkLeave))
+	h("POST /api/talk/rooms/{id}/call/signal", s.need(s.talkSignal))
 
 	// --- администрирование
 	h("GET /api/admin/users", s.admin(s.adminListUsers))
@@ -367,10 +393,17 @@ func (s *Server) sessionUser(r *http.Request) (*auth.User, string) {
 		return nil, ""
 	}
 	if strings.HasPrefix(hdr, "Basic ") && strings.HasPrefix(r.URL.Path, "/api/") {
-		if user, pass, ok := r.BasicAuth(); ok && s.allow(r, "basic", 60, time.Minute) {
+		// Считаем только неудачные попытки, как в WebDAV: клиент синхронизации с паролем приложения
+		// шлёт сотни запросов в минуту, и лимит на все запросы отрезал бы его посреди синхронизации.
+		if user, pass, ok := r.BasicAuth(); ok {
+			key := "basic-fail|" + clientIP(r)
+			if s.lim.Blocked(key, basicMaxFails, basicFailWindow) {
+				return nil, ""
+			}
 			if u, err := s.Auth.CheckBasic(r.Context(), user, pass); err == nil {
 				return u, ""
 			}
+			s.lim.Fail(key, basicFailWindow)
 		}
 	}
 	return nil, ""
@@ -474,7 +507,7 @@ func okJSON(w http.ResponseWriter) { writeJSON(w, 200, map[string]bool{"ok": tru
 // fail переводит доменные ошибки в HTTP-коды.
 func fail(w http.ResponseWriter, err error) {
 	switch {
-	case errors.Is(err, files.ErrNotFound), errors.Is(err, auth.ErrNotFound), errors.Is(err, pim.ErrNotFound):
+	case errors.Is(err, files.ErrNotFound), errors.Is(err, auth.ErrNotFound), errors.Is(err, pim.ErrNotFound), errors.Is(err, talk.ErrNotFound):
 		writeErr(w, http.StatusNotFound, err.Error())
 	case errors.Is(err, files.ErrExists), errors.Is(err, auth.ErrUserExists), errors.Is(err, files.ErrShared), errors.Is(err, files.ErrTagExists):
 		writeErr(w, http.StatusConflict, err.Error())
@@ -486,7 +519,7 @@ func fail(w http.ResponseWriter, err error) {
 		writeErr(w, http.StatusInsufficientStorage, err.Error())
 	case errors.Is(err, files.ErrTooLarge):
 		writeErr(w, http.StatusRequestEntityTooLarge, err.Error())
-	case errors.Is(err, files.ErrForbidden):
+	case errors.Is(err, files.ErrForbidden), errors.Is(err, talk.ErrForbidden):
 		writeErr(w, http.StatusForbidden, err.Error())
 	case errors.Is(err, files.ErrOffset):
 		writeErr(w, http.StatusConflict, err.Error())

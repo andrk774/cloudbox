@@ -19,6 +19,8 @@ Self-hosted облачное хранилище в духе **Nextcloud**: од�
 - **Онлайн-редактор документов** Collabora Online / OnlyOffice через WOPI (с блокировками: пока документ открыт, другие клиенты его не перезапишут).
 - **Уведомления**: с вами поделились, новый комментарий, гость загрузил файл, ссылка скоро истечёт, квота почти заполнена.
 - **Журнал действий**: кто, что и когда загрузил, переименовал, удалил, скачал по ссылке.
+- **Чат**: личные переписки и групповые комнаты, сообщения в реальном времени, счётчики непрочитанного, уведомления браузера.
+- **Видеозвонки** в браузере (WebRTC) до 6 участников: камера, микрофон, показ экрана, входящий вызов в любом разделе.
 
 **Фото, заметки, календарь, контакты**
 - **Галерея** — лента всех фото и видео по дате съёмки (EXIF), с группировкой по месяцам.
@@ -68,6 +70,28 @@ Caddy сам получит сертификат Let's Encrypt. Для nginx —
 3. `docker compose --profile https --profile office up -d`
 
 DOCX/XLSX/PPTX/ODT открываются щелчком прямо в браузере. Подойдёт и OnlyOffice Docs с включённым WOPI — укажите его адрес в `CB_WOPI_URL`.
+
+### Чат и видеозвонки
+
+Чат работает сразу, без настройки. Сообщения доставляются по Server-Sent Events, поэтому подходит любой обратный прокси. Caddy из комплекта настраивать не нужно, а nginx получает заголовок `X-Accel-Buffering: no`.
+
+Для звонков нужно учесть три вещи:
+
+- **HTTPS.** Браузеры дают доступ к камере и микрофону только по HTTPS (или на `localhost`).
+- **TURN-сервер**, если участники в разных сетях. Без него звонок соединится только внутри одной локальной сети. Через мобильный интернет, корпоративный NAT и между разными домами нужен TURN, который ретранслирует медиапоток. В комплекте есть coturn:
+  1. Сгенерируйте секрет (`openssl rand -hex 32`) и впишите в `.env`:
+     ```
+     CB_TURN_SECRET=<секрет>
+     CB_TURN_URLS=turn:cloud.example.ru:3478?transport=udp,turn:cloud.example.ru:3478?transport=tcp
+     CB_STUN_URLS=stun:cloud.example.ru:3478
+     ```
+  2. Запустите: `docker compose --profile https --profile talk up -d`.
+  3. Откройте на сервере порты `3478/udp`, `3478/tcp` и `49160–49200/udp`. Если сервер сам за NAT (дома за роутером), пробросьте эти порты и раскомментируйте в `docker-compose.yml` строку `--external-ip`, указав в ней внешний IP.
+
+  Браузер получает от CloudBox временные учётные данные TURN (действуют 12 часов), сам секрет на клиент не попадает. coturn не ретранслирует трафик в частные сети, так что через него нельзя добраться до внутренних адресов.
+- **Размер звонка.** Звонок устроен «каждый с каждым», без медиасервера, поэтому участников не больше 6.
+
+Чат хранит состояние звонков в памяти процесса, поэтому CloudBox должен работать в одном экземпляре. Для домашнего и небольшого офисного сервера это обычный режим.
 
 ### S3 / Garage
 
@@ -177,6 +201,7 @@ docker compose run --rm app restore -i /backups/cloudbox-2026-11-03.tar.gz
 | `CB_WOPI_URL`, `CB_WOPI_DISCOVERY_URL`, `CB_WOPI_HOST_URL` | — | онлайн-редактор |
 | `CB_LOG_FORMAT` | `text` | `text` или `json` |
 | `CB_METRICS_TOKEN` | — | Bearer-токен для `/metrics` (без него — только из локальной сети) |
+| `CB_STUN_URLS`, `CB_TURN_URLS`, `CB_TURN_SECRET` | — | STUN/TURN для видеозвонков (через запятую) и секрет coturn `use-auth-secret`, см. «Чат и видеозвонки» |
 | `CB_TRUSTED_PROXIES` | loopback и частные сети | CIDR через запятую, от которых принимаются `X-Real-IP`/`X-Forwarded-For` (для журнала и защиты от перебора паролей). Если сервер доступен из интернета без прокси — `none` |
 
 ## Устройство
@@ -191,6 +216,8 @@ internal/oidc        OpenID Connect: discovery, PKCE, проверка подп�
 internal/dav         WebDAV поверх ядра + виртуальная папка «Доступно мне»
 internal/pim         CalDAV/CardDAV (go-webdav) с хранением в PostgreSQL
 internal/wopi        WOPI-хост для Collabora/OnlyOffice
+internal/talk        чат, доставка событий (SSE), сигнализация WebRTC, временные учётные данные TURN
+internal/netx        адрес клиента за доверенным прокси, ограничение частоты попыток
 internal/media       EXIF, миниатюры (изображения, ffmpeg, pdftoppm)
 internal/textext     извлечение текста для поиска (PDF, DOCX, XLSX, PPTX, ODF, текст)
 internal/storage     local, S3 (свой клиент SigV4), шифрующая обёртка AES-256-GCM
@@ -219,6 +246,9 @@ GET    /api/search?q=   /api/recent   /api/favorites   /api/gallery   /api/share
 POST   /api/user-shares {node_id, user_id|group_id, can_write}       POST /api/shares (публичная ссылка)
 GET    /api/files/{id}/comments|versions|access    PUT /api/files/{id}/tags|favorite
 GET    /api/activity   /api/notifications   /api/events?from=&to=   /api/contacts
+GET    /api/talk/events (SSE)   /api/talk/rooms   POST /api/talk/rooms {name,user_ids}   POST /api/talk/direct {user_id}
+GET/POST /api/talk/rooms/{id}/messages[?before=ID]   POST /api/talk/rooms/{id}/read {last_id}
+POST   /api/talk/rooms/{id}/call/join|leave|signal {peer[,to,type,data]}
 ```
 
 ```bash
@@ -232,6 +262,8 @@ curl -H "Authorization: Bearer $TOKEN" --data-binary @video.mp4 \
 go test ./...                                    # unit: шифрование, TOTP (RFC 6238), OIDC, EXIF, извлечение текста
 CB_URL=… python3 scripts/e2e.py                  # 62 проверки: файлы, версии, корзина, квоты, ссылки, WebDAV
 CB_URL=… FIXTURES=… python3 scripts/e2e2.py      # 98 проверок: шаринг, докачка, миниатюры, поиск, 2FA, CalDAV/CardDAV, WOPI…
+CB_URL=… python3 scripts/e2e_talk.py             # чат: доставка, права, непрочитанное, сигнализация звонков
+CB_URL=… node scripts/e2e_browser.mjs            # настоящий видеозвонок в Chrome без окна (поддельная камера)
 CB_URL=… CB_USER=… CB_PASS=… sh scripts/sync-test.sh   # 14 проверок клиента синхронизации
 ```
 
@@ -251,8 +283,9 @@ CB_DATABASE_URL=postgres://... CB_SECRET=... ./cloudbox
 ## Чего пока нет
 
 - Нативных мобильных приложений (вместо них — PWA + WebDAV-клиенты для автозагрузки) и графического клиента синхронизации (есть консольный).
-- Чата и видеозвонков (Talk), почты.
+- Почты.
 - Сквозного шифрования на стороне клиента (шифрование — на сервере).
+- Больших видеоконференций: звонок «каждый с каждым», до 6 участников, без медиасервера (SFU).
 
 ## Лицензия
 
