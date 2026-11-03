@@ -47,7 +47,9 @@ function b32enc(u8) {
   return out.match(/.{1,4}/g).join('-');
 }
 function b32dec(s) {
-  const clean = s.toUpperCase().replace(/[^A-Z0-9]/g, '').replace(/O/g, '0').replace(/[IL]/g, '1');
+  // только верхний регистр и без разделителей; похожие символы не «исправляем»: I, O, 0, 1 в алфавите нет,
+  // а L есть — замена L→1 ломала ключи, где встречается L
+  const clean = s.toUpperCase().replace(/[^A-Z0-9]/g, '');
   let bits = 0, val = 0; const out = [];
   for (const c of clean) {
     const i = B32.indexOf(c);
