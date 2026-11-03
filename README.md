@@ -320,6 +320,7 @@ CB_URL=… python3 scripts/e2e_talk.py             # чат: доставка, �
 CB_URL=… node scripts/e2e_browser.mjs            # настоящий видеозвонок в Chrome без окна (поддельная камера) и вредоносное HTML-письмо
 CB_URL=… python3 scripts/e2e_mail.py             # почта: SSRF, изоляция ящиков, отправка, вложения, папки (нужен mailtest)
 CB_URL=… python3 scripts/e2e_crypto.py           # E2E-папки на сервере: только шифротекст, запреты, граница, версии метаданных
+node scripts/e2e_crypto_unit.mjs                 # криптография E2E-клиента без браузера: ключ восстановления, формат, подмена
 CB_URL=… CB_USER=… CB_PASS=… sh scripts/sync-test.sh      # 14 проверок консольного клиента синхронизации
 CB_URL=… CB_USER=… CB_PASS=… sh scripts/desktop-test.sh   # графический клиент: защита окна, настройка, синхронизация, пауза, один экземпляр
 ```

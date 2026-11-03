@@ -28,7 +28,9 @@ jobs:
       - name: go vet
         run: go vet ./...
       - name: Unit-тесты
-        run: go test -race ./...
+        run: |
+          go test -race ./...
+          node scripts/e2e_crypto_unit.mjs
       - name: Сборка
         run: |
           go build -o cloudbox ./cmd/cloudbox
