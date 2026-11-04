@@ -53,6 +53,11 @@ type Config struct {
 	// TrustedProxies — CIDR через запятую, от которых принимаются X-Real-IP/X-Forwarded-For; "none" — никому.
 	TrustedProxies string
 
+	// Видеозвонки: STUN/TURN-серверы (через запятую) и общий секрет coturn (use-auth-secret).
+	STUNURLs   string
+	TURNURLs   string
+	TURNSecret string
+
 	WOPIEditorURL    string
 	WOPIDiscoveryURL string
 	WOPIHostURL      string
@@ -96,6 +101,10 @@ func Load() Config {
 		OIDCLinkByName:   envBool("CB_OIDC_LINK_BY_USERNAME", false),
 		PasswordLogin:    envBool("CB_PASSWORD_LOGIN", true),
 		TrustedProxies:   env("CB_TRUSTED_PROXIES", netx.DefaultTrustedProxies),
+
+		STUNURLs:   env("CB_STUN_URLS", ""),
+		TURNURLs:   env("CB_TURN_URLS", ""),
+		TURNSecret: env("CB_TURN_SECRET", ""),
 
 		WOPIEditorURL:    strings.TrimRight(env("CB_WOPI_URL", ""), "/"),
 		WOPIDiscoveryURL: env("CB_WOPI_DISCOVERY_URL", ""),
