@@ -17,6 +17,9 @@ type Config struct {
 	DatabaseURL       string
 	PublicURL         string // внешний адрес, например https://cloud.example.ru
 	Secret            string // ключ для подписи cookie публичных ссылок
+	SecretGenerated   bool   // CB_SECRET не задан и сгенерирован при запуске (меняется при каждом перезапуске)
+	MailAllowPrivate  bool   // почта: разрешить серверы в локальной сети (и без шифрования — только им)
+	MailExtraPorts    string // почта: дополнительные разрешённые порты через запятую (Proton Mail Bridge: 1143,1025)
 	AllowRegistration bool
 	DefaultQuotaMB    int64 // 0 — без ограничения
 	MaxVersions       int   // сколько старых версий хранить на файл
@@ -106,6 +109,9 @@ func Load() Config {
 		TURNURLs:   env("CB_TURN_URLS", ""),
 		TURNSecret: env("CB_TURN_SECRET", ""),
 
+		MailAllowPrivate: envBool("CB_MAIL_ALLOW_PRIVATE", false),
+		MailExtraPorts:   env("CB_MAIL_EXTRA_PORTS", ""),
+
 		WOPIEditorURL:    strings.TrimRight(env("CB_WOPI_URL", ""), "/"),
 		WOPIDiscoveryURL: env("CB_WOPI_DISCOVERY_URL", ""),
 		WOPIHostURL:      env("CB_WOPI_HOST_URL", ""),
@@ -117,6 +123,7 @@ func Load() Config {
 		b := make([]byte, 32)
 		_, _ = rand.Read(b)
 		c.Secret = hex.EncodeToString(b)
+		c.SecretGenerated = true
 		log.Println("WARN: CB_SECRET не задан — сгенерирован временный, пароли публичных ссылок придётся вводить заново после перезапуска")
 	}
 	return c
