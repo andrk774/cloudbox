@@ -47,6 +47,9 @@ func (s *Service) CreateShare(ctx context.Context, uid int64, nodeID, password s
 	if err != nil {
 		return nil, err
 	}
+	if n.E2E {
+		return nil, ErrE2E // по ссылке гость получил бы шифротекст без ключа
+	}
 	var ph *string
 	if password != "" {
 		h, err := secure.HashPassword(password)

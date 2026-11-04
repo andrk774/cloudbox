@@ -24,6 +24,9 @@ var (
 	ErrInvalidName = errors.New("недопустимое имя")
 	ErrCycle       = errors.New("нельзя переместить папку внутрь самой себя")
 	ErrTooLarge    = errors.New("файл слишком большой")
+	ErrE2E         = errors.New("в зашифрованной (E2E) папке это недоступно: сервер не видит её содержимое")
+	ErrE2EBoundary = errors.New("нельзя переносить и копировать файлы между зашифрованной (E2E) папкой и обычной")
+	ErrE2EPlain    = errors.New("в зашифрованную папку можно положить только файл, зашифрованный в браузере: откройте папку в CloudBox и загрузите через неё")
 	ErrForbidden   = errors.New("недостаточно прав")
 	ErrCrossOwner  = errors.New("нельзя переместить между хранилищами разных владельцев — используйте копирование")
 	ErrConflict    = errors.New("файл изменён кем-то другим — обновите страницу")
@@ -46,6 +49,7 @@ type Node struct {
 	DeletedAt *time.Time `json:"deleted_at,omitempty"`
 	Etag      string     `json:"etag"`
 	TakenAt   *time.Time `json:"taken_at,omitempty"`
+	E2E       bool       `json:"e2e,omitempty"` // внутри E2E-папки: имя и содержимое — шифротекст клиента
 	// Для корзины: исходное расположение
 	OrigPath string `json:"orig_path,omitempty"`
 
@@ -76,7 +80,7 @@ type Version struct {
 	Current   bool      `json:"current"`
 }
 
-const nodeCols = `id, owner_id, parent_id, name, is_dir, size, mime, current_version_id, created_at, updated_at, deleted_at, etag, taken_at`
+const nodeCols = `id, owner_id, parent_id, name, is_dir, size, mime, current_version_id, created_at, updated_at, deleted_at, etag, taken_at, e2e`
 
 // nodeColsP — те же колонки с префиксом таблицы (для JOIN и рекурсивных запросов).
 func nodeColsP(p string) string {
@@ -93,7 +97,7 @@ func scanNode(s scanner) (*Node, error) {
 	var n Node
 	var parent, ver sql.NullString
 	var del, taken sql.NullTime
-	if err := s.Scan(&n.ID, &n.OwnerID, &parent, &n.Name, &n.IsDir, &n.Size, &n.Mime, &ver, &n.CreatedAt, &n.UpdatedAt, &del, &n.Etag, &taken); err != nil {
+	if err := s.Scan(&n.ID, &n.OwnerID, &parent, &n.Name, &n.IsDir, &n.Size, &n.Mime, &ver, &n.CreatedAt, &n.UpdatedAt, &del, &n.Etag, &taken, &n.E2E); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}

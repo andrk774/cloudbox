@@ -184,6 +184,14 @@ func (s *Server) Handler() http.Handler {
 	h("POST /api/talk/rooms/{id}/call/leave", s.need(s.talkLeave))
 	h("POST /api/talk/rooms/{id}/call/signal", s.need(s.talkSignal))
 
+	// --- сквозное шифрование (E2E-папки)
+	h("GET /api/e2e/keys", s.need(s.e2eKeys))
+	h("PUT /api/e2e/keys", s.need(s.e2ePutKeys))
+	h("DELETE /api/e2e/keys", s.need(s.e2eDeleteKeys))
+	h("POST /api/e2e/folders", s.need(s.e2eCreateFolder))
+	h("GET /api/e2e/meta/{id}", s.need(s.e2eMeta))
+	h("PUT /api/e2e/meta/{id}", s.need(s.e2ePutMeta))
+
 	// --- почта
 	h("GET /api/mail", s.need(s.mailInfo))
 	h("GET /api/mail/preset", s.need(s.mailPreset))

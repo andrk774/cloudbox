@@ -71,6 +71,21 @@ chk "конфликтная копия загружена на сервер" 'tr
 echo "x" > "$L/dry.txt"
 CLOUDBOX_PASSWORD=$P $SYNC -server "$URL" -user "$U" -local "$L" -remote "/Синхронизация" -dry-run > /dev/null 2>&1
 chk "dry-run не загружает" '! tree | grep -q "dry.txt"'
+rm -f "$L/dry.txt"
+
+# 9. зашифрованные (E2E) папки синхронизация не трогает ни с одной стороны
+api -X PUT -H "Content-Type: application/json" "$URL/api/e2e/keys" \
+  -d '{"data":{"v":1,"pass":{"iter":600000,"salt":"AA==","iv":"AA==","ct":"AA=="},"rec":{"iv":"AA==","ct":"AA=="}},"version":0}' > /dev/null
+VAULT=$(api -H "Content-Type: application/json" "$URL/api/e2e/folders" -d "{\"parent\":\"$ROOT\",\"name\":\"Сейф\"}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+OBF=$(python3 -c 'import secrets; print(secrets.token_hex(16))')
+printf 'CBE1xxxxxxxxшифротекст-шифротекст' | api --data-binary @- "$URL/api/files/upload?parent=$VAULT&name=$OBF" > /dev/null
+OUT=$(run)
+chk "E2E-папка не скачивается" '[ ! -e "$L/Сейф" ]'
+chk "клиент сообщает, что пропускает E2E-папку" 'echo "$OUT" | grep -q "зашифрованную папку Сейф"'
+mkdir -p "$L/Сейф" && echo "локальный файл" > "$L/Сейф/мой.txt"
+run > /dev/null
+N=$(api "$URL/api/files?parent=$VAULT" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["items"]))')
+chk "одноимённая локальная папка не выгружается в E2E-папку" '[ "$N" = 1 ] && [ -f "$L/Сейф/мой.txt" ]'
 
 rm -rf "$L"
 echo

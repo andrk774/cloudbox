@@ -28,7 +28,9 @@ jobs:
       - name: go vet
         run: go vet ./...
       - name: Unit-тесты
-        run: go test -race ./...
+        run: |
+          go test -race ./...
+          node scripts/e2e_crypto_unit.mjs
       - name: Сборка
         run: |
           go build -o cloudbox ./cmd/cloudbox
@@ -72,6 +74,7 @@ jobs:
           CB_URL=http://127.0.0.1:8080 python3 scripts/e2e_talk.py
           CB_URL=http://127.0.0.1:8080 SHOT=call.png MAILTEST_SMTP=1025 MAILTEST_IMAP=1143 node scripts/e2e_browser.mjs
           CB_URL=http://127.0.0.1:8080 python3 scripts/e2e_mail.py
+          CB_URL=http://127.0.0.1:8080 python3 scripts/e2e_crypto.py
           PASS=$(python3 scripts/app_password.py http://127.0.0.1:8080 andrey secret123)
           CB_URL=http://127.0.0.1:8080 CB_USER=andrey CB_PASS=$PASS SYNC=./cloudbox-sync sh scripts/sync-test.sh
           CB_URL=http://127.0.0.1:8080 CB_USER=andrey CB_PASS=$PASS DESKTOP=./cloudbox-desktop sh scripts/desktop-test.sh

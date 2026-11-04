@@ -67,6 +67,7 @@ type TreeEntry struct {
 	SHA256    string    `json:"sha256,omitempty"`
 	VersionID string    `json:"version_id,omitempty"`
 	Etag      string    `json:"etag"`
+	E2E       bool      `json:"e2e,omitempty"` // шифротекст E2E-папки: клиенты синхронизации его пропускают
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
@@ -74,13 +75,13 @@ type TreeEntry struct {
 func (s *Service) Tree(ctx context.Context, owner int64, root *string) ([]TreeEntry, error) {
 	rows, err := s.DB.QueryContext(ctx, `
 		WITH RECURSIVE t AS (
-			SELECT id, name::text AS path, is_dir, size, current_version_id, etag, updated_at
+			SELECT id, name::text AS path, is_dir, size, current_version_id, etag, updated_at, e2e
 			FROM nodes WHERE owner_id=$1 AND parent_id IS NOT DISTINCT FROM $2 AND deleted_at IS NULL
 			UNION ALL
-			SELECT n.id, t.path || '/' || n.name, n.is_dir, n.size, n.current_version_id, n.etag, n.updated_at
+			SELECT n.id, t.path || '/' || n.name, n.is_dir, n.size, n.current_version_id, n.etag, n.updated_at, n.e2e
 			FROM nodes n JOIN t ON n.parent_id=t.id WHERE n.deleted_at IS NULL
 		)
-		SELECT t.id, t.path, t.is_dir, t.size, COALESCE(v.sha256,''), COALESCE(t.current_version_id::text,''), t.etag, t.updated_at
+		SELECT t.id, t.path, t.is_dir, t.size, COALESCE(v.sha256,''), COALESCE(t.current_version_id::text,''), t.etag, t.updated_at, t.e2e
 		FROM t LEFT JOIN versions v ON v.id=t.current_version_id ORDER BY t.path`, owner, root)
 	if err != nil {
 		return nil, err
@@ -89,7 +90,7 @@ func (s *Service) Tree(ctx context.Context, owner int64, root *string) ([]TreeEn
 	out := []TreeEntry{}
 	for rows.Next() {
 		var e TreeEntry
-		if err := rows.Scan(&e.ID, &e.Path, &e.IsDir, &e.Size, &e.SHA256, &e.VersionID, &e.Etag, &e.UpdatedAt); err != nil {
+		if err := rows.Scan(&e.ID, &e.Path, &e.IsDir, &e.Size, &e.SHA256, &e.VersionID, &e.Etag, &e.UpdatedAt, &e.E2E); err != nil {
 			return nil, err
 		}
 		out = append(out, e)
