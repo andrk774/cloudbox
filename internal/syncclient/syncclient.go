@@ -52,6 +52,9 @@ type state struct {
 	RemoteRoot string           `json:"remote_root"`
 	Etag       string           `json:"etag"`
 	Entries    map[string]entry `json:"entries"`
+	// E2ERoots — зашифрованные (E2E) папки на сервере: их содержимое — шифротекст с случайными именами,
+	// расшифровать его может только веб-интерфейс. Клиент синхронизации их не трогает ни с одной стороны.
+	E2ERoots []string `json:"e2e_roots,omitempty"`
 }
 
 type remoteEntry struct {
@@ -62,6 +65,7 @@ type remoteEntry struct {
 	SHA256    string    `json:"sha256"`
 	VersionID string    `json:"version_id"`
 	UpdatedAt time.Time `json:"updated_at"`
+	E2E       bool      `json:"e2e"`
 }
 
 type client struct {
@@ -291,10 +295,54 @@ func (s *syncer) scanRemote() (map[string]remoteEntry, string, bool, error) {
 		return nil, "", false, err
 	}
 	out := map[string]remoteEntry{}
+	e2e := map[string]bool{}
 	for _, e := range resp.Entries {
+		if e.E2E {
+			e2e[e.Path] = true
+			continue
+		}
 		out[e.Path] = e
 	}
+	if !resp.Unchanged {
+		var roots []string
+		for p := range e2e {
+			if !e2e[path.Dir(p)] { // родитель — обычная папка: это корень E2E-папки
+				roots = append(roots, p)
+				if !slicesContains(s.st.E2ERoots, p) {
+					s.log("пропускаю зашифрованную папку %s — её открывают в веб-интерфейсе CloudBox", p)
+				}
+			}
+		}
+		sort.Strings(roots)
+		s.st.E2ERoots = roots
+	}
 	return out, resp.Etag, resp.Unchanged, nil
+}
+
+func slicesContains(list []string, v string) bool {
+	for _, x := range list {
+		if x == v {
+			return true
+		}
+	}
+	return false
+}
+
+// dropE2E убирает из локального дерева пути под зашифрованными папками: иначе одноимённая
+// локальная папка выглядела бы новой и уехала бы на сервер (или наоборот считалась удалённой).
+func (s *syncer) dropE2E(local map[string]localEntry) map[string]localEntry {
+	if len(s.st.E2ERoots) == 0 {
+		return local
+	}
+	for p := range local {
+		for _, r := range s.st.E2ERoots {
+			if p == r || strings.HasPrefix(p, r+"/") {
+				delete(local, p)
+				break
+			}
+		}
+	}
+	return local
 }
 
 // ---------- проход синхронизации ----------
@@ -322,6 +370,7 @@ func (s *syncer) run() error {
 		}
 		return err
 	}
+	local = s.dropE2E(local)
 	if unchanged {
 		// на сервере ничего не менялось — берём дерево из состояния
 		remote = map[string]remoteEntry{}

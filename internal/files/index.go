@@ -14,7 +14,10 @@ import (
 // ---------- полнотекстовый поиск ----------
 
 func (s *Service) queueIndex(ctx context.Context, q querier, nodeID, name, mime string) error {
-	if !textext.Supported(name, mime) {
+	// содержимое E2E-файлов — шифротекст: индексировать нечего (и нельзя пытаться)
+	var e2e bool
+	q.QueryRowContext(ctx, `SELECT e2e FROM nodes WHERE id=$1`, nodeID).Scan(&e2e)
+	if e2e || !textext.Supported(name, mime) {
 		_, err := q.ExecContext(ctx, `DELETE FROM node_text WHERE node_id=$1`, nodeID)
 		return err
 	}
@@ -124,7 +127,7 @@ func (s *Service) Search(ctx context.Context, uid int64, q string) ([]Node, erro
 		       COALESCE(ts_rank(t.tsv, tq.r), 0) AS rank
 		FROM nodes n CROSS JOIN tq
 		LEFT JOIN node_text t ON t.node_id = n.id
-		WHERE n.owner_id=$1 AND n.deleted_at IS NULL
+		WHERE n.owner_id=$1 AND n.deleted_at IS NULL AND NOT n.e2e
 		  AND (n.name ILIKE '%' || $2 || '%' OR (t.tsv IS NOT NULL AND (t.tsv @@ tq.r OR t.tsv @@ tq.s)))
 		ORDER BY name_hit DESC, n.is_dir DESC, rank DESC, n.updated_at DESC
 		LIMIT 200`, uid, like, q)

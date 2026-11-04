@@ -28,7 +28,7 @@ var thumbLocks sync.Map
 
 // Thumbnail возвращает JPEG-миниатюру текущей версии файла, создавая и кэшируя её при первом запросе.
 func (s *Service) Thumbnail(ctx context.Context, n *Node, size int) ([]byte, error) {
-	if n.IsDir || n.VersionID == nil || !media.Sizes[size] || !media.CanThumb(n.Mime) {
+	if n.E2E || n.IsDir || n.VersionID == nil || !media.Sizes[size] || !media.CanThumb(n.Mime) {
 		return nil, ErrNoThumb
 	}
 	vid := *n.VersionID

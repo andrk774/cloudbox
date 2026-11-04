@@ -288,6 +288,10 @@ func (s *Server) zip(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if n.E2E {
+		fail(w, files.ErrE2E)
+		return
+	}
 	s.writeZip(w, r, perm.Owner, n)
 }
 
@@ -299,6 +303,9 @@ func (s *Server) writeZip(w http.ResponseWriter, r *http.Request, owner int64, r
 	defer func() { zw.Close(); metrics.DownloadBytes.Add(cw.n) }()
 	var walk func(n *files.Node, prefix string) error
 	walk = func(n *files.Node, prefix string) error {
+		if n.E2E {
+			return nil // шифротекст со случайными именами в архиве бесполезен — E2E-файлы скачивает веб-клиент
+		}
 		p := path.Join(prefix, n.Name)
 		if !n.IsDir {
 			b, _, err := s.Files.Open(r.Context(), owner, n.ID, "")
