@@ -1,0 +1,74 @@
+name: Mobile
+
+on:
+  push:
+    branches: [main]
+    paths: ["mobile/**", ".github/workflows/mobile.yml", "internal/api/**", "internal/files/**"]
+  pull_request:
+    paths: ["mobile/**", ".github/workflows/mobile.yml", "internal/api/**", "internal/files/**"]
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: cloudbox
+          POSTGRES_PASSWORD: cloudbox
+          POSTGRES_DB: cloudbox
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U cloudbox" --health-interval 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.47.7"
+          channel: stable
+          cache: true
+      - name: Зависимости
+        working-directory: mobile
+        run: flutter pub get
+      - name: Анализ кода
+        working-directory: mobile
+        run: flutter analyze
+      - name: Сервер CloudBox для живого теста
+        env:
+          CB_DATABASE_URL: postgres://cloudbox:cloudbox@127.0.0.1:5432/cloudbox?sslmode=disable
+          CB_LISTEN: 127.0.0.1:8080
+          CB_PUBLIC_URL: http://127.0.0.1:8080
+          CB_SECRET: ci
+          CB_DATA_DIR: ${{ runner.temp }}/data
+          CB_TMP_DIR: ${{ runner.temp }}/tmp
+        run: |
+          mkdir -p "$CB_TMP_DIR"
+          go build -o cloudbox ./cmd/cloudbox
+          ./cloudbox > server.log 2>&1 &
+          for i in $(seq 30); do curl -sf http://127.0.0.1:8080/healthz && break; sleep 1; done
+          curl -sf -X POST -H 'Content-Type: application/json' http://127.0.0.1:8080/api/auth/register -d '{"username":"mobile","password":"mobile-12345"}' > /dev/null
+          PASS=$(python3 scripts/app_password.py http://127.0.0.1:8080 mobile mobile-12345 phone)
+          echo "CB_PASS=$PASS" >> "$GITHUB_ENV"
+      - name: Тесты (unit, виджеты, живой API)
+        working-directory: mobile
+        env:
+          CB_URL: http://127.0.0.1:8080
+          CB_USER: mobile
+        run: flutter test
+      - name: Сборка APK
+        working-directory: mobile
+        run: flutter build apk --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cloudbox-android
+          path: mobile/build/app/outputs/flutter-apk/app-release.apk
+      - name: Лог сервера
+        if: failure()
+        run: cat server.log
