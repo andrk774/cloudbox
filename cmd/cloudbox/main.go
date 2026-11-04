@@ -35,6 +35,7 @@ import (
 	"github.com/andrk774/cloudbox/internal/oidc"
 	"github.com/andrk774/cloudbox/internal/pim"
 	"github.com/andrk774/cloudbox/internal/storage"
+	"github.com/andrk774/cloudbox/internal/talk"
 	"github.com/andrk774/cloudbox/internal/wopi"
 	"github.com/andrk774/cloudbox/web"
 )
@@ -91,6 +92,8 @@ func main() {
 	pimSvc := &pim.Service{DB: database, Loc: loc}
 	srv := &api.Server{
 		Cfg: cfg, DB: database, Auth: authSvc, Files: fileSvc, PIM: pimSvc, Web: web.FS(),
+		Talk: &talk.Service{DB: database, Hub: talk.NewHub()},
+		ICE:  talk.ICEConfig{STUN: talk.SplitList(cfg.STUNURLs), TURN: talk.SplitList(cfg.TURNURLs), Secret: cfg.TURNSecret},
 		DAV:    &dav.Handler{Auth: authSvc, Files: fileSvc, TmpDir: cfg.TmpDir},
 		PIMDAV: &pim.Handler{Auth: authSvc, Svc: pimSvc},
 		WOPI: &wopi.Server{Files: fileSvc, Cfg: wopi.Config{EditorURL: cfg.WOPIEditorURL, DiscoveryURL: cfg.WOPIDiscoveryURL,
@@ -117,6 +120,7 @@ func main() {
 		IdleTimeout:       120 * time.Second,
 		// ReadTimeout/WriteTimeout не задаём: большие загрузки и скачивания могут идти часами
 	}
+	httpSrv.RegisterOnShutdown(srv.Talk.Hub.Close)
 	go func() {
 		<-ctx.Done()
 		shCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)

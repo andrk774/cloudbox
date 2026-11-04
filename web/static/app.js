@@ -244,7 +244,7 @@ let els = {};
 
 const NAV = [
   ['files', '📁', 'Все файлы'], ['recent', '🕘', 'Недавние'], ['favorites', '⭐', 'Избранное'], ['shared', '👥', 'Доступно мне'],
-  ['gallery', '🖼️', 'Галерея'], ['notes', '🗒️', 'Заметки'], ['calendar', '📅', 'Календарь'], ['contacts', '📇', 'Контакты'],
+  ['talk', '💬', 'Чат'], ['gallery', '🖼️', 'Галерея'], ['notes', '🗒️', 'Заметки'], ['calendar', '📅', 'Календарь'], ['contacts', '📇', 'Контакты'],
   ['shares', '🔗', 'Мои ссылки'], ['activity', '📜', 'Журнал'], ['trash', '🗑️', 'Корзина'], ['settings', '⚙️', 'Настройки'],
 ];
 
@@ -292,6 +292,8 @@ function renderApp() {
   addEventListener('hashchange', route);
   route();
   receiveSharedFiles();
+  Talk.start();
+  Talk.setUnread(state.usage.talk_unread);
 }
 
 function renderQuota() {
@@ -335,6 +337,7 @@ function route() {
     recent: viewRecent, favorites: viewFavorites, shared: viewShared,
     tag: () => viewTag(+parts[1]),
     search: () => viewSearch(decodeURIComponent(parts.slice(1).join('/'))),
+    talk: () => viewTalk(parts[1] || null),
     gallery: viewGallery, notes: () => viewNotes(parts[1]), calendar: viewCalendar, contacts: viewContacts,
     activity: viewActivity, trash: viewTrash, shares: viewShares, settings: viewSettings, admin: viewAdmin,
     receive: () => viewFiles(null),

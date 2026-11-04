@@ -1,7 +1,7 @@
 'use strict';
 /* Service worker CloudBox: установка как приложение (PWA) и приём файлов из меню «Поделиться» (Android). */
-const SHELL = 'cloudbox-shell-v2';
-const ASSETS = ['/', '/app.css', '/app.js', '/views.js', '/md.js', '/vendor/purify.min.js', '/vendor/qrcode.js', '/icon.svg'];
+const SHELL = 'cloudbox-shell-v3';
+const ASSETS = ['/', '/app.css', '/app.js', '/views.js', '/talk.js', '/md.js', '/vendor/purify.min.js', '/vendor/qrcode.js', '/icon.svg'];
 
 self.addEventListener('install', e => { e.waitUntil(caches.open(SHELL).then(c => c.addAll(ASSETS)).then(() => self.skipWaiting())); });
 self.addEventListener('activate', e => {
