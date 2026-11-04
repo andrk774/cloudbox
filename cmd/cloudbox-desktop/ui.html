@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CloudBox — синхронизация</title>
+<style>
+:root { --bg:#f6f7f9; --panel:#fff; --text:#1c2330; --muted:#6b7484; --line:#e4e7ec; --accent:#2f6fed; --danger:#d33a3a; --ok:#1f9d55; --warn:#d98200; color-scheme: light; }
+@media (prefers-color-scheme: dark) { :root { --bg:#12151b; --panel:#1a1f27; --text:#e6e9ef; --muted:#8b94a5; --line:#2a313c; --accent:#5b8cff; --danger:#ff6b6b; --ok:#3ccf7f; --warn:#ffb340; color-scheme: dark; } }
+* { box-sizing: border-box; }
+body { margin: 0; font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--text); }
+main { max-width: 760px; margin: 0 auto; padding: 24px 16px 60px; }
+h1 { font-size: 20px; margin: 0 0 16px; display: flex; align-items: center; gap: 10px; }
+.logo { width: 32px; height: 32px; border-radius: 8px; background: var(--accent); color: #fff; display: grid; place-items: center; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin-bottom: 14px; }
+.status { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.dot { width: 12px; height: 12px; border-radius: 50%; background: var(--muted); flex: none; }
+.dot.idle { background: var(--ok); } .dot.syncing { background: var(--accent); animation: pulse 1s infinite; } .dot.error { background: var(--danger); } .dot.setup { background: var(--warn); }
+@keyframes pulse { 50% { opacity: .35; } }
+.status .big { font-size: 16px; font-weight: 600; }
+.muted { color: var(--muted); font-size: 13px; }
+.err { color: var(--danger); margin-top: 8px; white-space: pre-wrap; }
+.row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+button { font: inherit; padding: 8px 14px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); color: var(--text); cursor: pointer; }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button:disabled { opacity: .5; cursor: default; }
+label { display: block; margin: 12px 0 4px; font-weight: 600; font-size: 13px; }
+input[type=text], input[type=password], input[type=url], input[type=number] { width: 100%; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: inherit; font: inherit; }
+.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px; }
+@media (max-width: 560px) { .grid { grid-template-columns: 1fr; } }
+.check { display: flex; gap: 8px; align-items: center; font-weight: normal; }
+pre { margin: 0; max-height: 260px; overflow: auto; font: 12px/1.5 ui-monospace, Consolas, monospace; white-space: pre-wrap; color: var(--muted); }
+.stats { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 8px; }
+.stats b { font-size: 16px; }
+</style>
+</head>
+<body>
+<main>
+  <h1><span class="logo">☁</span> CloudBox — синхронизация</h1>
+
+  <section class="card">
+    <div class="status"><span class="dot" id="dot"></span><span class="big" id="state">…</span><span class="muted" id="when"></span></div>
+    <div class="muted" id="pair"></div>
+    <div class="stats" id="stats"></div>
+    <div class="err" id="error"></div>
+    <div class="row">
+      <button class="primary" id="syncBtn">⟳ Синхронизировать сейчас</button>
+      <button id="pauseBtn">⏸ Пауза</button>
+      <button id="folderBtn">📂 Открыть папку</button>
+      <button id="webBtn">🌐 Открыть сайт</button>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2 style="font-size:16px;margin:0">Настройки</h2>
+    <div class="muted">Пароль приложения создаётся на сайте CloudBox: <b>Настройки → Пароли приложений</b>. Основной пароль сюда вводить не нужно.</div>
+    <form id="form">
+      <label for="server">Адрес CloudBox</label>
+      <input type="url" id="server" placeholder="https://cloud.example.ru" required>
+      <div class="grid">
+        <div><label for="user">Имя пользователя</label><input type="text" id="user" autocomplete="username" required></div>
+        <div><label for="password">Пароль приложения</label><input type="password" id="password" autocomplete="new-password" placeholder=""></div>
+      </div>
+      <div class="grid">
+        <div><label for="local">Папка на этом компьютере</label><input type="text" id="local" placeholder="~/CloudBox" required></div>
+        <div><label for="remote">Папка на сервере</label><input type="text" id="remote" placeholder="/ — все файлы"></div>
+      </div>
+      <div class="grid">
+        <div><label for="interval">Проверять изменения каждые, секунд</label><input type="number" id="interval" min="10" value="60"></div>
+        <div><label>&nbsp;</label><label class="check"><input type="checkbox" id="autostart"> Запускать при входе в систему</label></div>
+      </div>
+      <div class="err" id="formError"></div>
+      <div class="row"><button class="primary" type="submit" id="saveBtn">Сохранить и проверить</button></div>
+    </form>
+  </section>
+
+  <section class="card">
+    <h2 style="font-size:16px;margin:0 0 8px">Журнал</h2>
+    <pre id="log">—</pre>
+  </section>
+
+  <div class="row"><button id="quitBtn">Выйти из CloudBox</button></div>
+</main>
+<script>
+'use strict';
+const $ = id => document.getElementById(id);
+const STATE = { setup: 'Нужна настройка', idle: 'Всё синхронизировано', syncing: 'Синхронизация…', paused: 'На паузе', error: 'Ошибка синхронизации' };
+async function call(method, path, body) {
+  const r = await fetch(path, { method, headers: body ? { 'Content-Type': 'application/json' } : {}, body: body ? JSON.stringify(body) : undefined });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d.error || 'Ошибка ' + r.status);
+  return d;
+}
+let filled = false;
+function draw(s) {
+  $('dot').className = 'dot ' + s.state;
+  $('state').textContent = STATE[s.state] || s.state;
+  $('when').textContent = s.last_ok ? 'последняя синхронизация: ' + new Date(s.last_ok).toLocaleString('ru-RU') : '';
+  $('pair').textContent = s.local ? `${s.local}  ⇄  ${s.server}${s.remote === '/' ? '' : s.remote}` : '';
+  $('error').textContent = s.error || '';
+  const st = s.stats || {};
+  const items = [['загружено', st.Up], ['скачано', st.Down], ['удалено здесь', st.DelLocal], ['удалено на сервере', st.DelRemote], ['конфликтов', st.Conflicts]];
+  $('stats').replaceChildren(...(s.last_ok ? items.map(([k, v]) => { const d = document.createElement('div'); const b = document.createElement('b'); b.textContent = v || 0; d.append(b, ' ', k); return d; }) : []));
+  $('pauseBtn').textContent = s.paused ? '▶ Продолжить' : '⏸ Пауза';
+  for (const id of ['syncBtn', 'pauseBtn', 'folderBtn', 'webBtn']) $(id).disabled = s.state === 'setup';
+  $('log').textContent = s.logs.length ? s.logs.slice().reverse().join('\n') : '—';
+  if (!filled) {
+    filled = true;
+    $('server').value = s.server || ''; $('user').value = s.user || ''; $('local').value = s.local || '';
+    $('remote').value = s.remote || '/'; $('interval').value = s.interval_sec || 60; $('autostart').checked = !!s.autostart;
+    $('password').placeholder = s.has_password ? 'сохранён — оставьте пустым, чтобы не менять' : 'пароль приложения';
+  }
+}
+async function refresh() { try { draw(await call('GET', '/api/status')); } catch (e) { $('state').textContent = 'Клиент не отвечает'; } }
+$('syncBtn').onclick = () => call('POST', '/api/sync').then(refresh);
+$('pauseBtn').onclick = async () => { const s = await call('GET', '/api/status'); draw(await call('POST', '/api/pause', { paused: !s.paused })); };
+$('folderBtn').onclick = () => call('POST', '/api/open');
+$('webBtn').onclick = () => call('POST', '/api/web');
+$('quitBtn').onclick = async () => { if (confirm('Выйти? Синхронизация остановится до следующего запуска.')) { await call('POST', '/api/quit'); document.body.textContent = 'CloudBox закрыт. Окно можно закрыть.'; } };
+$('form').onsubmit = async e => {
+  e.preventDefault();
+  $('formError').textContent = ''; $('saveBtn').disabled = true; $('saveBtn').textContent = 'Проверяю…';
+  try {
+    draw(await call('POST', '/api/config', { server: $('server').value.trim(), user: $('user').value.trim(), password: $('password').value,
+      local: $('local').value.trim(), remote: $('remote').value.trim(), interval_sec: +$('interval').value, autostart: $('autostart').checked }));
+    $('password').value = ''; $('password').placeholder = 'сохранён — оставьте пустым, чтобы не менять';
+  } catch (err) { $('formError').textContent = err.message; }
+  finally { $('saveBtn').disabled = false; $('saveBtn').textContent = 'Сохранить и проверить'; }
+};
+refresh();
+setInterval(refresh, 2000);
+</script>
+</body>
+</html>
