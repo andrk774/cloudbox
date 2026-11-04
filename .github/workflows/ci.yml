@@ -34,6 +34,7 @@ jobs:
           go build -o cloudbox ./cmd/cloudbox
           go build -o cloudbox-sync ./cmd/cloudbox-sync
           go build -o mailtest ./internal/mail/mailtest/cmd/mailtest
+          go build -o cloudbox-desktop ./cmd/cloudbox-desktop
       - name: Тестовые файлы и фейковый WOPI discovery
         run: |
           mkdir -p fx/hosting
@@ -73,6 +74,7 @@ jobs:
           CB_URL=http://127.0.0.1:8080 python3 scripts/e2e_mail.py
           PASS=$(python3 scripts/app_password.py http://127.0.0.1:8080 andrey secret123)
           CB_URL=http://127.0.0.1:8080 CB_USER=andrey CB_PASS=$PASS SYNC=./cloudbox-sync sh scripts/sync-test.sh
+          CB_URL=http://127.0.0.1:8080 CB_USER=andrey CB_PASS=$PASS DESKTOP=./cloudbox-desktop sh scripts/desktop-test.sh
       - name: Лог сервера
         if: failure()
         run: cat server.log
