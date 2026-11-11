@@ -3,12 +3,15 @@ import 'package:flutter/material.dart';
 
 import 'api.dart';
 import 'autoupload.dart';
+import 'background.dart';
 import 'screens/files.dart';
 import 'screens/login.dart';
 import 'storage.dart';
 
-void main() {
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await Background.init(); // Android: регистрирует точку входа фоновой автозагрузки
+  if (await AutoUpload.enabled()) await Background.schedule(); // восстановить задачу после обновления приложения
   runApp(const CloudBoxApp());
 }
 

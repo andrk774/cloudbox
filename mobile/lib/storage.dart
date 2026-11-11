@@ -35,9 +35,13 @@ class Storage {
     await p.remove(autoUploadKey);
     await p.remove(autoUploadSinceKey);
     await p.remove(autoUploadDoneKey);
+    await p.remove(autoUploadLastRunKey);
   }
 
   static const autoUploadKey = 'autoupload_enabled';
   static const autoUploadSinceKey = 'autoupload_since_ms';
   static const autoUploadDoneKey = 'autoupload_done';
+  static const autoUploadLastRunKey = 'autoupload_last_run_ms';
+  static const wifiOnlyKey = 'autoupload_wifi_only';
+  static const chargingOnlyKey = 'autoupload_charging_only';
 }
