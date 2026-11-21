@@ -19,6 +19,8 @@ type Hub struct {
 	subs  map[int64]map[string]*Sub // user_id → peer_id → подписка
 	peers map[string]*Sub
 	calls map[string]*Call // room_id → звонок
+
+	MaxPeers int // участников в звонке: MaxCallPeers для mesh, MaxSFUPeers с медиасервером
 }
 
 // Event — событие для клиента: в SSE уходит как `event: <Type>` и `data: <JSON Data>`.
@@ -66,7 +68,7 @@ var (
 )
 
 func NewHub() *Hub {
-	return &Hub{subs: map[int64]map[string]*Sub{}, peers: map[string]*Sub{}, calls: map[string]*Call{}}
+	return &Hub{MaxPeers: MaxCallPeers, subs: map[int64]map[string]*Sub{}, peers: map[string]*Sub{}, calls: map[string]*Call{}}
 }
 
 func frame(e Event) []byte {
@@ -237,7 +239,7 @@ func (h *Hub) Join(uid int64, room, peer string) (st CallState, others []Partici
 		h.calls[room] = c
 		started = true
 	}
-	if _, already := c.Participants[peer]; !already && len(c.Participants) >= MaxCallPeers {
+	if _, already := c.Participants[peer]; !already && len(c.Participants) >= h.MaxPeers {
 		return st, nil, false, ErrCallFull
 	}
 	for p, x := range c.Participants {

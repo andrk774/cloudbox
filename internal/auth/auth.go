@@ -230,6 +230,7 @@ func (s *Service) DeleteSession(ctx context.Context, tok string) {
 
 func (s *Service) Cleanup(ctx context.Context) {
 	s.DB.ExecContext(ctx, `DELETE FROM sessions WHERE expires_at < now()`)
+	s.DB.ExecContext(ctx, `DELETE FROM account_tokens WHERE expires_at < now()`)
 }
 
 // ---------- пароли приложений и Basic-auth (WebDAV) ----------

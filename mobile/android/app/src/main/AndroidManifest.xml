@@ -9,6 +9,7 @@
     <!-- точное время и место съёмки остаются в оригинале фото при загрузке -->
     <uses-permission android:name="android.permission.ACCESS_MEDIA_LOCATION"/>
     <application
+        android:allowBackup="false"
         android:label="CloudBox"
         android:usesCleartextTraffic="true"
         android:name="${applicationName}"

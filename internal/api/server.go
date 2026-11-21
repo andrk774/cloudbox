@@ -75,6 +75,10 @@ func (s *Server) Handler() http.Handler {
 	h("POST /api/auth/login", s.login)
 	h("POST /api/auth/totp", s.loginTOTP)
 	h("POST /api/auth/logout", s.logout)
+	h("POST /api/auth/forgot", s.forgotPassword)
+	h("POST /api/auth/recovery", s.redeemRecovery)
+	h("GET /api/me/recovery", s.need(s.getRecovery))
+	h("POST /api/me/recovery", s.need(s.setRecovery))
 	h("GET /api/auth/oidc/start", s.oidcStart)
 	h("GET /api/auth/oidc/callback", s.oidcCallback)
 

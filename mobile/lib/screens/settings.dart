@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 import '../api.dart';
 import '../autoupload.dart';
 import '../storage.dart';
+import '../background.dart';
+import '../offline.dart';
 import 'login.dart';
 
 /// Настройки: учётная запись, место, автозагрузка фото, выход.
@@ -28,14 +30,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Future<void> _toggle(bool on) async {
     if (!on) {
       await AutoUpload.disable();
-      setState(() => _auto = false);
+      try { await BackgroundUpload.cancel(); } catch (_) { /* Disabled flag also stops the worker. */ }
+      if (mounted) setState(() => _auto = false);
       return;
     }
     final all = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('Автозагрузка фото'),
-        content: const Text('Фото и видео будут загружаться в папку «Фото/Камера» при каждом открытии приложения.\n\n'
+        content: const Text('Фото и видео будут загружаться в папку «Фото/Камера» при открытии и в фоне. Android: по Wi-Fi; на iOS условия и время выбирает система.\n\n'
             'Загрузить и уже снятые фото или только новые?'),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Отмена')),
@@ -50,19 +53,31 @@ class _SettingsScreenState extends State<SettingsScreen> {
       return;
     }
     setState(() => _auto = true);
+    try { await BackgroundUpload.schedule(); }
+    catch (_) {
+      if (mounted) setState(() => _status = 'Не удалось включить фоновый запуск. Выключите и снова включите автозагрузку.');
+      return;
+    }
     _run();
   }
 
   Future<void> _run() async {
-    setState(() => _status = 'Ищу новые фото…');
-    final r = await AutoUpload.run(widget.api, status: (s) => mounted ? setState(() => _status = s) : null);
     if (!mounted) return;
-    setState(() => _status = r.message ??
-        (r.uploaded + r.failed == 0 ? 'Новых фото нет' : 'Загружено: ${r.uploaded}${r.failed > 0 ? ', не удалось: ${r.failed}' : ''}'));
+    setState(() => _status = 'Ищу новые фото…');
+    try {
+      final r = await AutoUpload.run(widget.api, status: (s) => mounted ? setState(() => _status = s) : null);
+      if (!mounted) return;
+      setState(() => _status = r.message ??
+          (r.uploaded + r.failed == 0 ? 'Новых фото нет' : 'Загружено: ${r.uploaded}${r.failed > 0 ? ', не удалось: ${r.failed}' : ''}'));
+    } catch (e) { if (mounted) setState(() => _status = 'Загрузка остановлена: $e'); }
   }
 
   Future<void> _logout() async {
+    await AutoUpload.disable();
+    try { await BackgroundUpload.cancel(); } catch (_) { /* Signing out must remain possible. */ }
+    final store = await OfflineStore.forAccount(widget.api.base.toString(), widget.api.user);
     await Storage.clear();
+    await store.clear();
     if (!mounted) return;
     Navigator.of(context).pushAndRemoveUntil(MaterialPageRoute(builder: (_) => const LoginScreen()), (_) => false);
   }
@@ -91,7 +106,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         SwitchListTile(
           secondary: const Icon(Icons.photo_library),
           title: const Text('Автозагрузка фото и видео'),
-          subtitle: const Text('В «Фото/Камера/<год>» при открытии приложения'),
+          subtitle: const Text('При открытии и по расписанию ОС. Android: Wi-Fi. iOS: условия выбирает система. После принудительной остановки откройте приложение снова.'),
           value: _auto,
           onChanged: _toggle,
         ),
