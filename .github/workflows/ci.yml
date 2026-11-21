@@ -28,6 +28,8 @@ jobs:
       - name: go vet
         run: go vet ./...
       - name: Unit-тесты
+        env:
+          CB_TEST_DATABASE_URL: postgres://cloudbox:cloudbox@127.0.0.1:5432/cloudbox?sslmode=disable
         run: |
           go test -race ./...
           node scripts/e2e_crypto_unit.mjs

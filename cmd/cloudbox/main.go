@@ -94,7 +94,7 @@ func main() {
 	pimSvc := &pim.Service{DB: database, Loc: loc}
 	srv := &api.Server{
 		Cfg: cfg, DB: database, Auth: authSvc, Files: fileSvc, PIM: pimSvc, Web: web.FS(),
-		Talk:   &talk.Service{DB: database, Hub: talk.NewHub()},
+		Talk:   talkService(database, cfg),
 		Mail:   mailService(database, cfg),
 		ICE:    talk.ICEConfig{STUN: talk.SplitList(cfg.STUNURLs), TURN: talk.SplitList(cfg.TURNURLs), Secret: cfg.TURNSecret},
 		DAV:    &dav.Handler{Auth: authSvc, Files: fileSvc, TmpDir: cfg.TmpDir},
@@ -124,6 +124,9 @@ func main() {
 		// ReadTimeout/WriteTimeout не задаём: большие загрузки и скачивания могут идти часами
 	}
 	httpSrv.RegisterOnShutdown(srv.Talk.Hub.Close)
+	if srv.Talk.SFU != nil {
+		httpSrv.RegisterOnShutdown(srv.Talk.SFU.Close)
+	}
 	go func() {
 		<-ctx.Done()
 		shCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -353,4 +356,20 @@ func mailService(db *sql.DB, cfg config.Config) *mail.Service {
 		}
 	}
 	return mail.NewService(db, &mail.Dialer{AllowPrivate: cfg.MailAllowPrivate, ExtraPorts: ports}, secret)
+}
+
+// talkService — чат и звонки; с CB_SFU=true звонки идут через встроенный медиасервер (до 25 участников).
+func talkService(db *sql.DB, cfg config.Config) *talk.Service {
+	t := &talk.Service{DB: db, Hub: talk.NewHub()}
+	if !cfg.SFU {
+		return t
+	}
+	sfu, err := talk.NewSFU(talk.SFUConfig{UDPPort: cfg.SFUUDPPort, PublicIPs: talk.SplitList(cfg.SFUPublicIPs)}, t.Hub.SendPeer)
+	if err != nil {
+		fatal(err)
+	}
+	t.SFU = sfu
+	t.Hub.MaxPeers = talk.MaxSFUPeers
+	slog.Info("медиасервер звонков (SFU) включён", "udp", cfg.SFUUDPPort, "public_ip", cfg.SFUPublicIPs)
+	return t
 }

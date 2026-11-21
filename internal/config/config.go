@@ -13,6 +13,11 @@ import (
 )
 
 type Config struct {
+	SMTPHost          string
+	SMTPPort          string
+	SMTPUser          string
+	SMTPPassword      string
+	SMTPFrom          string
 	Listen            string
 	DatabaseURL       string
 	PublicURL         string // внешний адрес, например https://cloud.example.ru
@@ -61,6 +66,11 @@ type Config struct {
 	TURNURLs   string
 	TURNSecret string
 
+	// Медиасервер звонков (SFU): весь медиатрафик через один UDP-порт; без него — «каждый с каждым».
+	SFU          bool
+	SFUUDPPort   int
+	SFUPublicIPs string // внешний IP сервера за NAT (через запятую)
+
 	WOPIEditorURL    string
 	WOPIDiscoveryURL string
 	WOPIHostURL      string
@@ -68,6 +78,11 @@ type Config struct {
 
 func Load() Config {
 	c := Config{
+		SMTPHost:          env("CB_SMTP_HOST", ""),
+		SMTPPort:          env("CB_SMTP_PORT", "587"),
+		SMTPUser:          env("CB_SMTP_USER", ""),
+		SMTPPassword:      env("CB_SMTP_PASSWORD", ""),
+		SMTPFrom:          env("CB_SMTP_FROM", ""),
 		Listen:            env("CB_LISTEN", ":8080"),
 		DatabaseURL:       env("CB_DATABASE_URL", "postgres://cloudbox:cloudbox@localhost:5432/cloudbox?sslmode=disable"),
 		PublicURL:         strings.TrimRight(env("CB_PUBLIC_URL", "http://localhost:8080"), "/"),
@@ -108,6 +123,10 @@ func Load() Config {
 		STUNURLs:   env("CB_STUN_URLS", ""),
 		TURNURLs:   env("CB_TURN_URLS", ""),
 		TURNSecret: env("CB_TURN_SECRET", ""),
+
+		SFU:          envBool("CB_SFU", false),
+		SFUUDPPort:   int(envInt("CB_SFU_UDP_PORT", 7882)),
+		SFUPublicIPs: env("CB_SFU_PUBLIC_IP", ""),
 
 		MailAllowPrivate: envBool("CB_MAIL_ALLOW_PRIVATE", false),
 		MailExtraPorts:   env("CB_MAIL_EXTRA_PORTS", ""),

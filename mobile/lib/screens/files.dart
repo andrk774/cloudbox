@@ -7,6 +7,9 @@ import 'package:open_filex/open_filex.dart';
 import 'package:path_provider/path_provider.dart';
 
 import '../api.dart';
+import '../offline.dart';
+import '../storage.dart';
+import 'offline.dart';
 import 'settings.dart';
 
 /// Содержимое папки (parent == null — корень).
@@ -50,6 +53,27 @@ class _FilesScreenState extends State<FilesScreen> {
   }
 
   void _toast(String m) => ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(m)));
+
+  Future<void> _offlineFiles() async {
+    final store = await OfflineStore.forAccount(api.base.toString(), api.user);
+    if (!mounted) return;
+    Navigator.of(context).push(MaterialPageRoute(builder: (_) => OfflineScreen(store: store)));
+  }
+
+  Future<void> _saveOffline(Node n) async {
+    try {
+      _toast('Сохраняю «${n.name}»…');
+      final store = await OfflineStore.forAccount(api.base.toString(), api.user);
+      final bytes = await api.download(n.id);
+      final account = await Storage.load();
+      if (!mounted || account == null || CloudBoxApi.normalizeServer(account.server) != api.base || account.user != api.user) {
+        await bytes.listen((_) {}).cancel();
+        return;
+      }
+      await store.save(n, bytes);
+      if (mounted) _toast('«${n.name}» доступен без интернета');
+    } catch (e) { if (mounted) _toast('Не удалось сохранить: $e'); }
+  }
 
   Future<String?> _ask(String title, String label, [String value = '']) {
     final c = TextEditingController(text: value);
@@ -134,11 +158,14 @@ class _FilesScreenState extends State<FilesScreen> {
       builder: (ctx) => SafeArea(
         child: Wrap(children: [
           ListTile(title: Text(n.name, style: const TextStyle(fontWeight: FontWeight.w600))),
+          if (!n.isDir && !n.e2e) ListTile(leading: const Icon(Icons.offline_pin), title: const Text('Сохранить без интернета'), onTap: () {
+            Navigator.pop(ctx); _saveOffline(n);
+          }),
           if (!n.e2e) ListTile(leading: const Icon(Icons.open_in_new), title: const Text('Открыть'), onTap: () {
             Navigator.pop(ctx);
             _open(n);
           }),
-          ListTile(
+          if (_listing?.canWrite ?? true) ListTile(
             leading: const Icon(Icons.edit),
             title: const Text('Переименовать'),
             onTap: () async {
@@ -153,7 +180,7 @@ class _FilesScreenState extends State<FilesScreen> {
               }
             },
           ),
-          ListTile(
+          if (_listing?.canWrite ?? true) ListTile(
             leading: const Icon(Icons.delete_outline),
             title: const Text('Удалить'),
             onTap: () async {
@@ -213,6 +240,7 @@ class _FilesScreenState extends State<FilesScreen> {
       appBar: AppBar(
         title: Text(_found != null ? 'Поиск: $_query' : (widget.title ?? 'Все файлы')),
         actions: [
+          IconButton(icon: const Icon(Icons.offline_pin), tooltip: 'Без интернета', onPressed: _offlineFiles),
           IconButton(icon: Icon(_found != null ? Icons.close : Icons.search), tooltip: 'Поиск',
               onPressed: _found != null
                   ? () => setState(() {
@@ -262,8 +290,8 @@ class _FilesScreenState extends State<FilesScreen> {
                         title: Text(n.name, maxLines: 1, overflow: TextOverflow.ellipsis),
                         subtitle: Text(n.e2e ? 'зашифрованная папка — откройте в веб-версии' : n.isDir ? 'папка' : '${formatSize(n.size)} · ${_date(n.updatedAt)}'),
                         onTap: () => _open(n),
-                        onLongPress: canWrite ? () => _menu(n) : null,
-                        trailing: canWrite ? IconButton(icon: const Icon(Icons.more_vert), onPressed: () => _menu(n)) : null,
+                        onLongPress: () => _menu(n),
+                        trailing: IconButton(icon: const Icon(Icons.more_vert), onPressed: () => _menu(n)),
                       ),
                   ]),
                 ),

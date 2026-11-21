@@ -27,6 +27,7 @@ func (s *Server) authStatus(w http.ResponseWriter, r *http.Request) {
 		"password_login":    s.Cfg.PasswordLogin || n == 0,
 		"oidc":              s.OIDC != nil,
 		"oidc_name":         s.Cfg.OIDCName,
+		"password_recovery": s.recoveryEnabled(),
 	})
 }
 

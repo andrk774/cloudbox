@@ -346,6 +346,10 @@ async function viewSettings() {
   await refreshUsage();
   const u = state.usage;
   const me = u.user;
+  const recovery = await api('GET', '/api/me/recovery');
+  const recoveryEmail = h('input', { type: 'email', value: recovery.email, autocomplete: 'email', placeholder: 'email@example.ru' });
+  const recoveryPassword = h('input', { type: 'password', autocomplete: 'current-password', placeholder: 'Текущий пароль' });
+  const recoveryCode = h('input', { autocomplete: 'one-time-code', placeholder: 'Код 2FA или код восстановления' });
   const sec = (title, ...kids) => h('div', { class: 'card' }, h('h2', null, title), ...kids);
   const apList = h('div'), sesList = h('div'), loginList = h('div'), tfa = h('div');
 
@@ -409,6 +413,17 @@ async function viewSettings() {
   const davUrl = u.webdav_url;
   const pimInfo = await api('GET', '/api/pim');
   els.content.replaceChildren(
+    me.oidc ? null : sec('✉️ Восстановление пароля',
+      h('p', { class: 'hint' }, recovery.email ? 'Подтверждённый email: ' + recovery.email : 'Добавьте email и подтвердите его по ссылке из письма.'),
+      recovery.enabled ? [recoveryEmail, recoveryPassword, me.totp_enabled ? recoveryCode : null,
+        h('button', { class: 'btn', onclick: async e => {
+          e.target.disabled = true;
+          try {
+            await api('POST', '/api/me/recovery', { email: recoveryEmail.value, password: recoveryPassword.value, code: recoveryCode.value });
+            recoveryPassword.value = recoveryCode.value = ''; toast('Письмо отправлено. Откройте ссылку, чтобы подтвердить email.');
+          } catch (err) { report(err); } finally { e.target.disabled = false; }
+        } }, 'Отправить подтверждение')]
+        : h('p', { class: 'hint' }, 'Отправка писем не настроена администратором.')),
     sec('🔐 Двухфакторная аутентификация', tfa),
     sec('🔑 Пароли приложений',
       h('div', { class: 'hint' }, 'Для WebDAV, CalDAV/CardDAV и клиента синхронизации. Их можно отозвать, не меняя основной пароль.'),

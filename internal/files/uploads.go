@@ -190,10 +190,15 @@ func (s *Service) DeleteUpload(ctx context.Context, actor int64, id string) erro
 	if err != nil {
 		return err
 	}
-	os.Remove(s.uploadPath(id))
-	if n, _ := res.RowsAffected(); n == 0 {
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
 		return ErrNotFound
 	}
+	// Only remove bytes after the database confirms this actor owned the upload.
+	os.Remove(s.uploadPath(id))
 	return nil
 }
 
