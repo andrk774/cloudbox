@@ -417,10 +417,15 @@ Call.join = async function (roomId) {
   let r;
   try { r = await api('POST', `/api/talk/rooms/${roomId}/call/join`, { peer: Talk.peer }); }
   catch (e) { stream.getTracks().forEach(t => t.stop()); report(e); return; }
-  Object.assign(Call, { room: roomId, local: stream, ice: r.ice_servers, mic: true, cam: stream.getVideoTracks().length > 0, hidden: false });
+  Object.assign(Call, { room: roomId, local: stream, ice: r.ice_servers, mic: true, cam: stream.getVideoTracks().length > 0, hidden: false, mode: r.mode || 'mesh' });
   Call.render();
-  // новичок сам звонит тем, кто уже в звонке: так у пары всегда ровно один инициатор
-  for (const p of r.participants) Call.connect(p, true).catch(e => console.error('connect', e));
+  if (Call.mode === 'sfu') {
+    // через медиасервер: одно соединение с сервером, он пересылает видео остальных
+    Call.connectSFU().catch(e => { console.error('sfu', e); Call.hangup('Не удалось подключиться к медиасерверу'); });
+  } else {
+    // «каждый с каждым»: новичок сам звонит тем, кто уже в звонке — у пары всегда ровно один инициатор
+    for (const p of r.participants) Call.connect(p, true).catch(e => console.error('connect', e));
+  }
   if (Talk.view && Talk.view.id === roomId) Talk.drawHeader();
 };
 
@@ -448,12 +453,46 @@ Call.connect = async function (p, initiator) {
   return entry;
 };
 
+// connectSFU — соединение с медиасервером. Сервер присылает видео всех участников по этому же
+// соединению; streamId каждой дорожки — peer её владельца, по нему видео попадает в нужную плитку.
+// Дальше offer присылает только сервер (когда входят и выходят участники), клиент лишь отвечает.
+Call.connectSFU = async function () {
+  const pc = new RTCPeerConnection({ iceServers: Call.ice });
+  const entry = { pc, user: { peer: 'sfu' }, pending: Call.early.get('sfu') || [] };
+  Call.early.delete('sfu');
+  Call.pcs.set('sfu', entry);
+  for (const t of Call.local.getTracks()) pc.addTrack(t, Call.local);
+  pc.onicecandidate = e => { if (e.candidate) Call.signal('sfu', 'ice', e.candidate); };
+  pc.ontrack = e => {
+    const stream = e.streams[0];
+    if (!stream) return;
+    const src = stream.id;
+    const who = ((Talk.calls[Call.room] || {}).participants || []).find(p => p.peer === src) || { peer: src, username: '…' };
+    const t = Call.tile(who);
+    if (t.video.srcObject !== stream) t.video.srcObject = stream;
+    stream.onremovetrack = () => { if (!stream.getTracks().length) Call.dropTile(src); };
+  };
+  pc.onconnectionstatechange = () => {
+    if (pc.connectionState === 'failed') Call.hangup('Связь с медиасервером потеряна — проверьте, что UDP-порт медиасервера открыт');
+  };
+  await pc.setLocalDescription(await pc.createOffer());
+  Call.signal('sfu', 'offer', pc.localDescription);
+};
+
 Call.signal = function (to, type, data) {
   if (!Call.room) return;
   api('POST', `/api/talk/rooms/${Call.room}/call/signal`, { peer: Talk.peer, to, type, data }).catch(e => console.warn('signal', e.message));
 };
 
-Call.onSignal = async function (d) {
+// SSE preserves delivery order; async SDP operations must preserve it too.
+Call.signalQueue = Promise.resolve();
+Call.onSignal = function (d) {
+  const next = Call.signalQueue.then(() => Call.applySignal(d));
+  Call.signalQueue = next.catch(() => {});
+  return next;
+};
+
+Call.applySignal = async function (d) {
   if (d.room !== Call.room) return;
   let e = Call.pcs.get(d.from);
   if (d.type === 'offer') {
@@ -482,8 +521,10 @@ Call.flush = async function (e) {
 Call.reconcile = function (st) {
   const present = new Set(st.participants.map(p => p.peer));
   if (!present.has(Talk.peer)) { Call.hangup('Вы отключены от звонка'); return; }
-  for (const [peer, e] of Call.pcs) if (!present.has(peer)) { e.pc.close(); Call.pcs.delete(peer); Call.dropTile(peer); }
+  for (const [peer, e] of Call.pcs) if (peer !== 'sfu' && !present.has(peer)) { e.pc.close(); Call.pcs.delete(peer); Call.dropTile(peer); }
   for (const peer of Call.tiles.keys()) if (peer !== 'me' && !present.has(peer)) Call.dropTile(peer);
+  // в режиме SFU плитка может появиться раньше, чем стало известно имя участника
+  for (const p of st.participants) { const t = Call.tiles.get(p.peer); if (t && t.name.textContent !== p.username) t.name.textContent = p.username; }
   Call.drawCount(st.participants.length);
 };
 
@@ -516,18 +557,26 @@ Call.tile = function (p) {
   if (t) return t;
   const video = h('video', { autoplay: true, playsinline: true });
   const status = h('span', { class: 'st' });
-  const el = h('div', { class: 'tile' }, video, h('div', { class: 'label' }, p.username, status));
-  t = { el, video, state: status };
+  const name = h('span', null, p.username);
+  const el = h('div', { class: 'tile' }, video, h('div', { class: 'label' }, name, status));
+  t = { el, video, state: status, name };
   Call.tiles.set(p.peer, t);
   if (p.peer === 'me') Call.grid.prepend(el); else Call.grid.append(el);
-  Call.grid.dataset.n = Call.tiles.size;
+  Call.layout();
   return t;
+};
+
+// layout — сетка плиток: до 6 — заданные раскладки, больше (звонок через SFU) — автоматическая.
+Call.layout = function () {
+  const n = Call.tiles.size;
+  Call.grid.dataset.n = n;
+  Call.grid.style.gridTemplateColumns = n > 6 ? 'repeat(auto-fill, minmax(200px, 1fr))' : '';
 };
 
 Call.dropTile = function (peer) {
   const t = Call.tiles.get(peer);
   if (t) { t.video.srcObject = null; t.el.remove(); Call.tiles.delete(peer); }
-  if (Call.grid) Call.grid.dataset.n = Call.tiles.size;
+  if (Call.grid) Call.layout();
 };
 
 Call.toggleMic = function () {

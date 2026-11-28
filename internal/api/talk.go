@@ -81,6 +81,7 @@ func eventFrame(typ string, data any) []byte {
 func (s *Server) talkDisconnect(sub *talk.Sub) {
 	ctx := context.Background()
 	for _, st := range s.Talk.Hub.Unsubscribe(sub) {
+		s.sfuSync(st)
 		s.talkPublishRoom(ctx, st.Room, talk.Event{Type: "call", Data: st})
 		if ended, d := s.Talk.Hub.EndIfEmpty(st.Room); ended {
 			s.talkCallEnded(ctx, st.Room, d)
@@ -123,7 +124,8 @@ func fmtDuration(d time.Duration) string {
 func (s *Server) talkConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{
 		"ice_servers":    s.ICE.Servers(userFrom(r).ID, time.Now()),
-		"max_call_peers": talk.MaxCallPeers,
+		"max_call_peers": s.Talk.Hub.MaxPeers,
+		"mode":           s.callMode(),
 		"max_body":       talk.MaxBody,
 	})
 }
@@ -262,6 +264,7 @@ func (s *Server) talkRemoveMember(w http.ResponseWriter, r *http.Request) {
 	}
 	// исключённый больше не должен получать ни сообщения, ни медиапоток звонка
 	if st, changed := s.Talk.Hub.KickUser(target, id); changed {
+		s.sfuSync(st)
 		s.talkPublishRoom(r.Context(), id, talk.Event{Type: "call", Data: st})
 		s.Talk.Hub.Publish([]int64{target}, talk.Event{Type: "call", Data: talk.CallState{Room: id, Participants: []talk.Participant{}}})
 		if ended, d := s.Talk.Hub.EndIfEmpty(id); ended && !removed {
@@ -366,7 +369,7 @@ func (s *Server) talkJoin(w http.ResponseWriter, r *http.Request) {
 	if others == nil {
 		others = []talk.Participant{}
 	}
-	writeJSON(w, 200, map[string]any{"participants": others, "ice_servers": s.ICE.Servers(u.ID, time.Now())})
+	writeJSON(w, 200, map[string]any{"participants": others, "ice_servers": s.ICE.Servers(u.ID, time.Now()), "mode": s.callMode()})
 }
 
 func (s *Server) talkLeave(w http.ResponseWriter, r *http.Request) {
@@ -377,6 +380,7 @@ func (s *Server) talkLeave(w http.ResponseWriter, r *http.Request) {
 	}
 	u, id := userFrom(r), r.PathValue("id")
 	st, ended, d := s.Talk.Hub.Leave(u.ID, id, req.Peer)
+	s.sfuSync(st)
 	s.talkPublishRoom(r.Context(), id, talk.Event{Type: "call", Data: st})
 	if ended {
 		s.talkCallEnded(r.Context(), id, d)
@@ -408,6 +412,18 @@ func (s *Server) talkSignal(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusConflict, talk.ErrPeer.Error())
 		return
 	}
+	if req.To == talk.SFUPeerID { // сигнал медиасерверу — только от участника этого звонка
+		if s.Talk.SFU == nil || !s.Talk.Hub.InCall(id, req.Peer) {
+			writeErr(w, http.StatusConflict, talk.ErrNotInCall.Error())
+			return
+		}
+		if err := s.Talk.SFU.HandleSignal(id, req.Peer, req.Type, req.Data); err != nil {
+			writeErr(w, 400, "медиасервер не принял сигнал: "+err.Error())
+			return
+		}
+		okJSON(w)
+		return
+	}
 	if !s.Talk.Hub.InCall(id, req.Peer, req.To) {
 		writeErr(w, http.StatusConflict, talk.ErrNotInCall.Error())
 		return
@@ -416,4 +432,20 @@ func (s *Server) talkSignal(w http.ResponseWriter, r *http.Request) {
 		"room": id, "from": req.Peer, "user_id": u.ID, "username": u.Username, "type": req.Type, "data": req.Data,
 	}})
 	okJSON(w)
+}
+
+// callMode — как устроены звонки: через медиасервер (SFU) или «каждый с каждым» (mesh).
+func (s *Server) callMode() string {
+	if s.Talk.SFU != nil {
+		return "sfu"
+	}
+	return "mesh"
+}
+
+// sfuSync — состав звонка изменился (выход, закрытая вкладка, исключение): медиасервер
+// закрывает соединения тех, кого в звонке больше нет.
+func (s *Server) sfuSync(st talk.CallState) {
+	if s.Talk.SFU != nil {
+		s.Talk.SFU.Reconcile(st)
+	}
 }

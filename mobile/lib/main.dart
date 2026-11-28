@@ -3,12 +3,15 @@ import 'package:flutter/material.dart';
 
 import 'api.dart';
 import 'autoupload.dart';
+import 'background.dart';
 import 'screens/files.dart';
 import 'screens/login.dart';
 import 'storage.dart';
 
-void main() {
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // Failure of the scheduler must not prevent access to files and settings.
+  try { await BackgroundUpload.initialize(); } catch (_) { /* Settings can retry. */ }
   runApp(const CloudBoxApp());
 }
 

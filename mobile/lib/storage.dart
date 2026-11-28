@@ -12,7 +12,9 @@ class Account {
 
 class Storage {
   // Android: ключи в Keystore, данные — AES-GCM (по умолчанию в flutter_secure_storage 11); iOS: Keychain
-  static const _secure = FlutterSecureStorage();
+  static const _secure = FlutterSecureStorage(
+    iOptions: IOSOptions(accessibility: KeychainAccessibility.first_unlock_this_device),
+  );
 
   static Future<Account?> load() async {
     final server = await _secure.read(key: 'server');

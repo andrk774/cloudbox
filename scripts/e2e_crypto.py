@@ -5,7 +5,7 @@
 Само шифрование (WebCrypto в браузере) проверяет scripts/e2e_browser.mjs. Вход — Basic-auth
 (лимит входов по паролю в CI расходуют другие тесты).
 """
-import base64, json, os, secrets, sys, urllib.error, urllib.parse, urllib.request
+import base64, http.cookiejar, json, os, secrets, sys, time, urllib.error, urllib.parse, urllib.request
 
 B = os.environ.get("CB_URL", "http://127.0.0.1:8080")
 fails = 0
@@ -127,8 +127,39 @@ st, _ = ana.j("POST", "/api/user-shares", {"node_id": vid, "user_id": ids["crypt
 check(st == 400, "общий доступ к E2E-папке запрещён")
 st, _ = ana.req("GET", f"/api/files/{vid}/zip")
 check(st == 400, "ZIP E2E-папки не собирается")
-# /office/{id} принимает только cookie сессии, а тест входит через Basic (лимит входов по паролю в CI
-# расходуют другие сценарии) — запрет онлайн-офиса для E2E (officePage) здесь не проверяется.
+# /office requires a real browser session, not Basic authentication. Respect the
+# shared login rate limit instead of disabling it for the integration suite.
+jar = http.cookiejar.CookieJar()
+browser = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+deadline = time.monotonic() + 310
+while True:
+    try:
+        req = urllib.request.Request(B + "/api/auth/login",
+            data=json.dumps({"username": ana.name, "password": ana.pw}).encode(),
+            headers={"Content-Type": "application/json"})
+        with browser.open(req, timeout=30) as resp:
+            check(resp.status == 200 and bool(list(jar)), "office session authenticated")
+        break
+    except urllib.error.HTTPError as e:
+        if e.code != 429 or time.monotonic() >= deadline:
+            raise
+        time.sleep(5)
+
+def office(node):
+    try:
+        with browser.open(B + "/office/" + node, timeout=30) as resp:
+            return resp.status, resp.read()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read()
+
+# Positive control proves that neither missing authentication nor disabled WOPI
+# can make the encrypted-file denial pass accidentally.
+st, doc = up(ana, "", "office-control.docx", b"PK office test")
+check(st == 201, "office control uploaded")
+st, page = office(doc["id"])
+check(st == 200 and b'access_token' in page and b'WOPISrc=' in page, "office opens ordinary document")
+st, page = office(f["id"])
+check(st == 404 and b'access_token' not in page, "office rejects encrypted file")
 st, rec = ana.j("GET", "/api/recent")
 check(st == 200 and all(not x.get("e2e") for x in rec), "в «Недавних» нет шифротекста")
 st, tree = ana.j("GET", "/api/sync/tree")

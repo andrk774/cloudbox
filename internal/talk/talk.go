@@ -36,6 +36,7 @@ const (
 type Service struct {
 	DB  *sql.DB
 	Hub *Hub
+	SFU *SFU // медиасервер; nil — звонки «каждый с каждым»
 }
 
 type Member struct {

@@ -174,6 +174,7 @@ async function boot() {
   let st;
   try { st = await api('GET', '/api/auth/status'); } catch (e) { document.body.textContent = 'Сервер недоступен: ' + e.message; return; }
   state.status = st;
+  if (location.hash.startsWith('#/recovery?')) { renderRecovery(); return; }
   if (st.logged_in) { await loadMe(); renderApp(); } else renderAuth(st);
 }
 
@@ -229,6 +230,7 @@ function renderAuth(st) {
       pwForm,
       st.oidc && mode === 'login' ? h('a', { class: 'btn' + (st.password_login ? '' : ' primary'), style: 'width:100%;justify-content:center;margin-top:10px;padding:10px', href: '/api/auth/oidc/start' }, '🔐 ' + st.oidc_name) : null,
       err,
+      st.password_recovery && mode === 'login' ? h('button', { type: 'button', class: 'btn', onclick: () => renderRecovery(true) }, 'Забыли пароль?') : null,
       !st.first_user && st.registration_open ? h('div', { class: 'auth-switch' },
         mode === 'login' ? 'Нет аккаунта? ' : 'Уже есть аккаунт? ',
         h('a', { href: '#', onclick: e => { e.preventDefault(); mode = mode === 'login' ? 'register' : 'login'; draw(); } },
@@ -240,6 +242,42 @@ function renderAuth(st) {
 }
 
 // ---------- каркас ----------
+function renderRecovery(forgot = false) {
+  const params = new URLSearchParams(location.hash.split('?')[1] || '');
+  const token = params.get('token'), purpose = params.get('purpose');
+  // Keep the token only in memory after opening the link.
+  history.replaceState(null, '', location.pathname + '#/recovery');
+  const user = h('input', { autocomplete: 'username', required: true });
+  const pass = h('input', { type: 'password', autocomplete: 'new-password', minlength: 8, maxlength: 1024, required: true });
+  const again = h('input', { type: 'password', autocomplete: 'new-password', required: true });
+  const message = h('p', { role: 'status' });
+  const button = h('button', { class: 'btn primary', type: 'submit' }, forgot ? 'Отправить письмо' : purpose === 'verify' ? 'Подтвердить email' : 'Сохранить пароль');
+  const form = h('form', { class: 'auth-card', onsubmit: async e => {
+    e.preventDefault(); button.disabled = true; message.textContent = '';
+    try {
+      if (forgot) {
+        await api('POST', '/api/auth/forgot', { username: user.value.trim() });
+        message.textContent = 'Если у аккаунта есть подтверждённый email, на него придёт ссылка. Проверьте также папку «Спам».';
+      } else {
+        if (purpose === 'reset' && pass.value !== again.value) throw new Error('Пароли не совпадают');
+        await api('POST', '/api/auth/recovery', { token, purpose, password: pass.value });
+        pass.value = ''; again.value = '';
+        message.textContent = purpose === 'verify' ? 'Email подтверждён.' : 'Пароль изменён. Войдите заново. Пароли приложений отозваны — создайте новые в настройках.';
+      }
+      button.remove();
+    } catch (ex) { message.textContent = ex.message; button.disabled = false; }
+  } }, h('h1', null, forgot ? 'Восстановление пароля' : purpose === 'verify' ? 'Подтверждение email' : 'Новый пароль'),
+    forgot ? [h('label', null, 'Имя пользователя'), user] : purpose === 'reset' ? [
+      h('label', null, 'Новый пароль'), pass, h('label', null, 'Повторите пароль'), again,
+      h('p', { class: 'hint' }, 'Двухфакторная защита останется включённой. Восстановление пароля аккаунта не восстанавливает ключи E2E-папок.')
+    ] : null, button, message, h('a', { href: '/', onclick: e => { e.preventDefault(); history.replaceState(null, '', location.pathname); boot(); } }, 'Вернуться ко входу'));
+  $('#root').replaceChildren(h('div', { class: 'auth' }, form));
+}
+
+addEventListener('hashchange', () => {
+  if (location.hash.startsWith('#/recovery?')) renderRecovery();
+});
+
 let els = {};
 
 const NAV = [
@@ -322,6 +360,7 @@ async function loadSidebarTags() {
 
 // ---------- маршрутизация ----------
 function route() {
+  if (location.hash.startsWith('#/recovery')) return;
   const [hpath] = location.hash.replace(/^#\/?/, '').split('?');
   const parts = hpath.split('/');
   const view = parts[0] || 'files';
