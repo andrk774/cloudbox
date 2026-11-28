@@ -72,6 +72,7 @@ type sfuPeer struct {
 	senders map[string]*webrtc.RTPSender // id чужой дорожки → отправитель этому участнику
 
 	negMu       sync.Mutex
+	ready       bool // initial answer has been sent before server renegotiation
 	negotiating bool // отправлен offer, ждём answer
 	pending     bool // за это время состав дорожек снова изменился
 	early       []webrtc.ICECandidateInit
@@ -213,7 +214,12 @@ func (s *SFU) offer(roomID, peerID string, sd webrtc.SessionDescription) error {
 		return err
 	}
 	s.signal(roomID, peerID, "answer", p.pc.LocalDescription())
-	if added > 0 {
+	p.negMu.Lock()
+	p.ready = true
+	again := added > 0 || p.pending
+	p.pending = false
+	p.negMu.Unlock()
+	if again {
 		s.renegotiate(roomID, p)
 	}
 	s.requestKeyframes(r, peerID)
@@ -349,7 +355,7 @@ func (s *SFU) dropTrack(roomID string, r *sfuRoom, id string) {
 // renegotiate — новый offer участнику; если ответа на прошлый ещё нет — после него.
 func (s *SFU) renegotiate(roomID string, p *sfuPeer) {
 	p.negMu.Lock()
-	if p.negotiating || p.pc.SignalingState() != webrtc.SignalingStateStable {
+	if !p.ready || p.negotiating || p.pc.SignalingState() != webrtc.SignalingStateStable {
 		p.pending = true
 		p.negMu.Unlock()
 		return
