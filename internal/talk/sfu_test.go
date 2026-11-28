@@ -191,7 +191,7 @@ func TestSFUForwardsMedia(t *testing.T) {
 				c := clients[m.peer]
 				mu.Unlock()
 				if c != nil {
-					go c.onSignal(s, room, d["type"].(string), d["data"])
+					c.onSignal(s, room, d["type"].(string), d["data"])
 				}
 			}
 		}
@@ -261,5 +261,43 @@ func TestSFURejectsGarbage(t *testing.T) {
 	}
 	if err := s.HandleSignal("r", "p", "answer", raw(webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: "x"})); err == nil {
 		t.Fatal("answer без подключения должен отклоняться")
+	}
+}
+
+// Another participant can publish while this peer has sent only early ICE.
+// That must not turn the server into the initial offerer.
+func TestSFUDefersOfferUntilInitialAnswer(t *testing.T) {
+	var signals []string
+	var mu sync.Mutex
+	s, err := NewSFU(SFUConfig{}, func(_ string, e Event) bool {
+		mu.Lock()
+		defer mu.Unlock()
+		signals = append(signals, e.Data.(map[string]any)["type"].(string))
+		return true
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	p, err := s.newPeer("room", s.room("room", true), "peer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.renegotiate("room", p)
+	if !p.pending || p.negotiating || p.pc.LocalDescription() != nil {
+		t.Fatal("server started negotiation before the client's initial offer")
+	}
+	c := newTestClient(t, s, "room", "peer")
+	c.join(t, s, "room")
+	mu.Lock()
+	defer mu.Unlock()
+	var sdp []string
+	for _, typ := range signals {
+		if typ != "ice" {
+			sdp = append(sdp, typ)
+		}
+	}
+	if len(sdp) != 2 || sdp[0] != "answer" || sdp[1] != "offer" {
+		t.Fatalf("expected initial answer then deferred offer, got %v", sdp)
 	}
 }

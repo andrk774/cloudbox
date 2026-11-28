@@ -484,7 +484,15 @@ Call.signal = function (to, type, data) {
   api('POST', `/api/talk/rooms/${Call.room}/call/signal`, { peer: Talk.peer, to, type, data }).catch(e => console.warn('signal', e.message));
 };
 
-Call.onSignal = async function (d) {
+// SSE preserves delivery order; async SDP operations must preserve it too.
+Call.signalQueue = Promise.resolve();
+Call.onSignal = function (d) {
+  const next = Call.signalQueue.then(() => Call.applySignal(d));
+  Call.signalQueue = next.catch(() => {});
+  return next;
+};
+
+Call.applySignal = async function (d) {
   if (d.room !== Call.room) return;
   let e = Call.pcs.get(d.from);
   if (d.type === 'offer') {
